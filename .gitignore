@@ -83,3 +83,4 @@ software/chipwhisperer/logs/*
 !**/ChipWhisperer-Husky.bin
 *Zone.Identifier
 jupyter
+firmware/pqm4-Round3

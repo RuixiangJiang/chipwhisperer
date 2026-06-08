@@ -1,0 +1,16 @@
+{
+  "platform": "CWLITEARM",
+  "ss_version": "SS_VER_2_1",
+  "scope": {
+    "clkgen_freq": 7372800,
+    "adc_samples": 5000,
+    "adc_timeout": 2
+  },
+  "target": {
+    "pk_len": 800,
+    "ct_len": 768,
+    "ss_len": 32,
+    "pk_chunk": 200,
+    "ct_chunk": 128
+  }
+}
