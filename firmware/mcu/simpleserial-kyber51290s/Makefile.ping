@@ -1,0 +1,12 @@
+# Hey Emacs, this is a -*- makefile -*-
+
+TARGET = simpleserial-pingonly
+
+SRC += simpleserial-pingonly.c
+
+CRYPTO_TARGET = NONE
+
+include ../simpleserial/Makefile.simpleserial
+
+FIRMWAREPATH = ../.
+include $(FIRMWAREPATH)/Makefile.inc

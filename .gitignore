@@ -82,3 +82,4 @@ software/chipwhisperer/logs/*
 !**/ChipWhisperer-CW305.bin
 !**/ChipWhisperer-Husky.bin
 *Zone.Identifier
+jupyter

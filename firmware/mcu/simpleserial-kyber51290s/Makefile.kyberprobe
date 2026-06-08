@@ -1,0 +1,172 @@
+# ---------------------------------------------------------------------
+# ChipWhisperer wrapper target
+# ---------------------------------------------------------------------
+
+TARGET = simpleserial-kyberprobe
+
+SRC = simpleserial-kyberprobe.c
+# SRC += cw_randombytes_stub.c
+
+SS_VER = SS_VER_2_1
+CRYPTO_TARGET = NONE
+OPT = 3
+
+# ---------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------
+#
+# firmware/
+#   mcu/
+#     simpleserial-kyber51290s/
+#       Makefile
+#       simpleserial-kyber51290s.c
+#   pqm4-Round3/
+#     common/
+#     crypto_kem/
+#       kyber512-90s/
+#         m4fspeed/
+#         m4fstack/
+#       kyber768/
+#       kyber768-90s/
+#     mupq/
+#
+# This Makefile is in:
+#   firmware/mcu/simpleserial-kyber51290s/
+#
+# So ../../pqm4-Round3 points to:
+#   firmware/pqm4-Round3
+# ---------------------------------------------------------------------
+
+PQM4_ROOT = ../../pqm4-Round3
+
+KYBER_NAME ?= kyber512-90s
+KYBER_IMPL ?= m4fspeed
+
+KYBER_KEM_ROOT = $(PQM4_ROOT)/crypto_kem
+KYBER_DIR = $(KYBER_KEM_ROOT)/$(KYBER_NAME)/$(KYBER_IMPL)
+
+PQM4_COMMON = $(PQM4_ROOT)/common
+MUPQ_COMMON = $(PQM4_ROOT)/mupq/common
+
+# ---------------------------------------------------------------------
+# Include paths
+# ---------------------------------------------------------------------
+
+EXTRAINCDIRS += $(KYBER_DIR)
+EXTRAINCDIRS += $(KYBER_KEM_ROOT)/kyber512-90s/$(KYBER_IMPL)
+EXTRAINCDIRS += $(KYBER_KEM_ROOT)/kyber512/$(KYBER_IMPL)
+EXTRAINCDIRS += $(KYBER_KEM_ROOT)/kyber768-90s/$(KYBER_IMPL)
+EXTRAINCDIRS += $(KYBER_KEM_ROOT)/kyber768/$(KYBER_IMPL)
+EXTRAINCDIRS += $(PQM4_COMMON)
+EXTRAINCDIRS += $(MUPQ_COMMON)
+
+# ---------------------------------------------------------------------
+# Source discovery
+# ---------------------------------------------------------------------
+#
+# Important:
+# Do NOT put ../../pqm4-Round3/.../poly.c directly into SRC.
+# ChipWhisperer's Makefile will try to create:
+#   objdir-CWLITEARM/../../pqm4-Round3/.../poly.o
+# and fail.
+#
+# Instead:
+#   1. Find full paths.
+#   2. Add their directories to VPATH.
+#   3. Add only basenames, e.g. poly.c, kem.c, ntt.S, to SRC/ASRC.
+# ---------------------------------------------------------------------
+
+KYBER_C_FULL := $(shell find -L $(KYBER_DIR) -maxdepth 1 -name '*.c' 2>/dev/null)
+KYBER_S_FULL := $(shell find -L $(KYBER_DIR) -maxdepth 1 \( -name '*.S' -o -name '*.s' \) 2>/dev/null)
+
+KYBER_C_FULL := $(filter-out \
+	%/test.c \
+	%/speed.c \
+	%/stack.c \
+	%/main.c \
+	%/PQCgenKAT_kem.c \
+	%/nistkat.c, \
+	$(KYBER_C_FULL))
+
+COMMON_C_FULL :=
+COMMON_S_FULL :=
+
+# Kyber-90s normally needs AES/SHA2 support.
+COMMON_C_FULL += $(wildcard $(PQM4_COMMON)/aes.c)
+COMMON_C_FULL += $(wildcard $(PQM4_COMMON)/aes-publicinputs.c)
+COMMON_C_FULL += $(wildcard $(PQM4_COMMON)/crypto_hashblocks_sha512.c)
+COMMON_C_FULL += $(wildcard $(MUPQ_COMMON)/sha2.c)
+COMMON_C_FULL += $(wildcard $(MUPQ_COMMON)/fips202.c)
+COMMON_C_FULL += $(wildcard $(MUPQ_COMMON)/sp800-185.c)
+COMMON_C_FULL += $(PQM4_COMMON)/randombytes.c
+
+COMMON_S_FULL += $(wildcard $(PQM4_COMMON)/aes-encrypt.S)
+COMMON_S_FULL += $(wildcard $(PQM4_COMMON)/aes-keyschedule.S)
+COMMON_S_FULL += $(wildcard $(PQM4_COMMON)/crypto_hashblocks_sha512_inner32.s)
+COMMON_S_FULL += $(wildcard $(PQM4_COMMON)/keccakf1600.S)
+COMMON_S_FULL += $(wildcard $(MUPQ_COMMON)/keccakf1600.S)
+
+# COMMON_C_FULL := $(filter-out %/randombytes.c, $(COMMON_C_FULL))
+# COMMON_C_FULL := $(filter-out %/hal-opencm3.c, $(COMMON_C_FULL))
+# COMMON_C_FULL := $(filter-out %/hal-mps2.c, $(COMMON_C_FULL))
+# COMMON_C_FULL := $(filter-out %/test.c, $(COMMON_C_FULL))
+# COMMON_C_FULL := $(filter-out %/aestest.c, $(COMMON_C_FULL))
+
+ALL_C_FULL := $(KYBER_C_FULL) $(COMMON_C_FULL)
+ALL_S_FULL := $(KYBER_S_FULL) $(COMMON_S_FULL)
+
+# VPATH tells make where to find poly.c, kem.c, fastntt.S, etc.
+VPATH += $(sort $(dir $(ALL_C_FULL) $(ALL_S_FULL)))
+
+# Only add basenames to SRC/ASRC, so object files are:
+#   objdir-CWLITEARM/poly.o
+# not:
+#   objdir-CWLITEARM/../../pqm4-Round3/.../poly.o
+SRC  += $(notdir $(ALL_C_FULL))
+ASRC += $(notdir $(ALL_S_FULL))
+
+# ---------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------
+
+CFLAGS += -DKYBER_TRIGGER_INSIDE_DECODER=0
+CFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-sign-compare
+CFLAGS += -Wno-implicit-function-declaration
+
+# Optional: print what this Makefile detected
+print-kyber-files:
+	@echo "KYBER_DIR = $(KYBER_DIR)"
+	@echo "VPATH = $(VPATH)"
+	@echo "SRC = $(SRC)"
+	@echo "ASRC = $(ASRC)"
+	@echo "EXTRAINCDIRS = $(EXTRAINCDIRS)"
+
+# ---------------------------------------------------------------------
+# ChipWhisperer build system
+# ---------------------------------------------------------------------
+
+include ../simpleserial/Makefile.simpleserial
+
+FIRMWAREPATH = ../.
+include $(FIRMWAREPATH)/Makefile.inc
+
+FPU_FLAGS = -mfpu=fpv4-sp-d16 -mfloat-abi=softfp
+
+CFLAGS := $(filter-out -mfloat-abi=soft,$(CFLAGS)) $(FPU_FLAGS)
+ASFLAGS := $(filter-out -mfloat-abi=soft,$(ASFLAGS)) $(FPU_FLAGS)
+LDFLAGS := $(filter-out -mfloat-abi=soft,$(LDFLAGS)) $(FPU_FLAGS)
+
+# Build aes-publicinputs.S as a separate object to avoid basename collision
+# with aes-publicinputs.c. This does not modify pqm4 sources.
+
+PQM4_AES_PUBLICINPUTS_ASM = $(PQM4_COMMON)/aes-publicinputs.S
+PQM4_AES_PUBLICINPUTS_ASM_OBJ = objdir-$(PLATFORM)/aes_publicinputs_asm_pqm4.o
+
+OBJS += $(PQM4_AES_PUBLICINPUTS_ASM_OBJ)
+
+$(TARGET)-$(PLATFORM).elf: $(PQM4_AES_PUBLICINPUTS_ASM_OBJ)
+
+$(PQM4_AES_PUBLICINPUTS_ASM_OBJ): $(PQM4_AES_PUBLICINPUTS_ASM)
+	@mkdir -p $(dir $@)
+	@echo "Assembling custom PQM4 AES publicinputs object: $<"
+	$(CC) -c -mcpu=cortex-m4 -I. -x assembler-with-cpp -mthumb $(FPU_FLAGS) -fmessage-length=0 -ffunction-sections -DF_CPU=$(F_CPU) $(addprefix -I,$(EXTRAINCDIRS)) $< -o $@
