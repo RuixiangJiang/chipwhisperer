@@ -78,9 +78,15 @@ static uint8_t cmd_decaps_probe(uint8_t *buf, uint8_t len)
 
     uint8_t out[1 + CRYPTO_BYTES];
 
+#ifdef CW_TRIGGER_DECAPS_FULL
     trigger_high();
+#endif
+
     int ret = crypto_kem_dec(ss_dec, ct, sk);
+
+#ifdef CW_TRIGGER_DECAPS_FULL
     trigger_low();
+#endif
 
     out[0] = (uint8_t)ret;
     memcpy(out + 1, ss_dec, CRYPTO_BYTES);

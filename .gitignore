@@ -84,3 +84,6 @@ software/chipwhisperer/logs/*
 *Zone.Identifier
 jupyter
 firmware/pqm4-Round3
+
+experiments/*/data
+*.log

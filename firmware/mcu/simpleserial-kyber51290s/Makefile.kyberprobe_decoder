@@ -2,10 +2,9 @@
 # ChipWhisperer wrapper target
 # ---------------------------------------------------------------------
 
-TARGET = simpleserial-kyberprobe
+TARGET = simpleserial-kyberprobe-decoder
 
 SRC = simpleserial-kyberprobe.c
-# SRC += cw_randombytes_stub.c
 
 SS_VER = SS_VER_2_1
 CRYPTO_TARGET = NONE
@@ -129,7 +128,7 @@ ASRC += $(notdir $(ALL_S_FULL))
 # Flags
 # ---------------------------------------------------------------------
 
-CFLAGS += -DCW_TRIGGER_DECAPS_FULL
+CFLAGS += -DCW_TRIGGER_POLY_TOMSG
 CFLAGS += -DKYBER_TRIGGER_INSIDE_DECODER=0
 CFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-sign-compare
 CFLAGS += -Wno-implicit-function-declaration
