@@ -7,9 +7,93 @@
 
 #include "api.h"
 
+/*
+ * Trigger-source selection for firmware experiments.
+ *
+ * Default for the bit208 inner-trigger experiment:
+ *   - command-level K/E/D triggers are disabled;
+ *   - fault-handler blink triggers are disabled;
+ *   - the visible trigger should come only from lower-level code such as
+ *     m4fspeed/poly.c around the selected poly_tomsg() instruction.
+ *
+ * Re-enable a source at compile time if needed, for example:
+ *   -DPROBE_ENABLE_ENCAP_TRIGGER=1
+ *   -DPROBE_ENABLE_KEYPAIR_TRIGGER=1
+ *   -DPROBE_ENABLE_DECAP_FULL_TRIGGER=1
+ *   -DPROBE_ENABLE_FAULT_HANDLER_TRIGGER=1
+ *
+ * Backward compatibility:
+ *   defining CW_TRIGGER_DECAPS_FULL enables the D-command full decapsulation
+ *   trigger unless PROBE_ENABLE_DECAP_FULL_TRIGGER is explicitly set.
+ */
+#ifndef PROBE_ENABLE_ENCAP_TRIGGER
+#define PROBE_ENABLE_ENCAP_TRIGGER 0
+#endif
+
+#ifndef PROBE_ENABLE_KEYPAIR_TRIGGER
+#define PROBE_ENABLE_KEYPAIR_TRIGGER 0
+#endif
+
+#ifdef CW_TRIGGER_DECAPS_FULL
+#ifndef PROBE_ENABLE_DECAP_FULL_TRIGGER
+#define PROBE_ENABLE_DECAP_FULL_TRIGGER 1
+#endif
+#endif
+
+#ifndef PROBE_ENABLE_DECAP_FULL_TRIGGER
+#define PROBE_ENABLE_DECAP_FULL_TRIGGER 0
+#endif
+
+#ifndef PROBE_ENABLE_FAULT_HANDLER_TRIGGER
+#define PROBE_ENABLE_FAULT_HANDLER_TRIGGER 0
+#endif
+
+#if PROBE_ENABLE_ENCAP_TRIGGER
+#define PROBE_ENCAP_TRIGGER_HIGH() do { trigger_high(); } while (0)
+#define PROBE_ENCAP_TRIGGER_LOW()  do { trigger_low();  } while (0)
+#else
+#define PROBE_ENCAP_TRIGGER_HIGH() do { } while (0)
+#define PROBE_ENCAP_TRIGGER_LOW()  do { } while (0)
+#endif
+
+#if PROBE_ENABLE_KEYPAIR_TRIGGER
+#define PROBE_KEYPAIR_TRIGGER_HIGH() do { trigger_high(); } while (0)
+#define PROBE_KEYPAIR_TRIGGER_LOW()  do { trigger_low();  } while (0)
+#else
+#define PROBE_KEYPAIR_TRIGGER_HIGH() do { } while (0)
+#define PROBE_KEYPAIR_TRIGGER_LOW()  do { } while (0)
+#endif
+
+#if PROBE_ENABLE_DECAP_FULL_TRIGGER
+#define PROBE_DECAP_FULL_TRIGGER_HIGH() do { trigger_high(); } while (0)
+#define PROBE_DECAP_FULL_TRIGGER_LOW()  do { trigger_low();  } while (0)
+#else
+#define PROBE_DECAP_FULL_TRIGGER_HIGH() do { } while (0)
+#define PROBE_DECAP_FULL_TRIGGER_LOW()  do { } while (0)
+#endif
+
+#if PROBE_ENABLE_FAULT_HANDLER_TRIGGER
+#define PROBE_FAULT_TRIGGER_HIGH() do { trigger_high(); } while (0)
+#define PROBE_FAULT_TRIGGER_LOW()  do { trigger_low();  } while (0)
+#else
+#define PROBE_FAULT_TRIGGER_HIGH() do { } while (0)
+#define PROBE_FAULT_TRIGGER_LOW()  do { } while (0)
+#endif
+
+
 #define PK_CHUNK 200
 #define SK_CHUNK 96
 #define CT_CHUNK 128
+
+#ifndef KYBER_SYMBYTES
+#define KYBER_SYMBYTES 32
+#endif
+
+#ifndef KYBER_INDCPA_SECRETKEYBYTES
+#define KYBER_INDCPA_SECRETKEYBYTES 768
+#endif
+
+#define INDCPA_SK_CHUNK 128
 
 static uint8_t pk[CRYPTO_PUBLICKEYBYTES];
 static uint8_t sk[CRYPTO_SECRETKEYBYTES];
@@ -17,6 +101,7 @@ static uint8_t ct[CRYPTO_CIPHERTEXTBYTES];
 static uint8_t ss_enc[CRYPTO_BYTES];
 static uint8_t ss_dec[CRYPTO_BYTES];
 
+extern void indcpa_dec(unsigned char *m, const unsigned char *c, const unsigned char *sk);
 
 static void enable_fpu(void)
 {
@@ -51,9 +136,9 @@ static uint8_t cmd_encaps_probe(uint8_t *buf, uint8_t len)
 
     uint8_t out[1 + CRYPTO_BYTES];
 
-    trigger_high();
+    PROBE_ENCAP_TRIGGER_HIGH();
     int ret = crypto_kem_enc(ct, ss_enc, pk);
-    trigger_low();
+    PROBE_ENCAP_TRIGGER_LOW();
 
     out[0] = (uint8_t)ret;
     memcpy(out + 1, ss_enc, CRYPTO_BYTES);
@@ -78,15 +163,11 @@ static uint8_t cmd_decaps_probe(uint8_t *buf, uint8_t len)
 
     uint8_t out[1 + CRYPTO_BYTES];
 
-#ifdef CW_TRIGGER_DECAPS_FULL
-    trigger_high();
-#endif
+    PROBE_DECAP_FULL_TRIGGER_HIGH();
 
     int ret = crypto_kem_dec(ss_dec, ct, sk);
 
-#ifdef CW_TRIGGER_DECAPS_FULL
-    trigger_low();
-#endif
+    PROBE_DECAP_FULL_TRIGGER_LOW();
 
     out[0] = (uint8_t)ret;
     memcpy(out + 1, ss_dec, CRYPTO_BYTES);
@@ -194,9 +275,9 @@ static uint8_t cmd_keypair_probe(uint8_t *buf, uint8_t len)
 
     uint8_t out[1];
 
-    trigger_high();
+    PROBE_KEYPAIR_TRIGGER_HIGH();
     int ret = crypto_kem_keypair(pk, sk);
-    trigger_low();
+    PROBE_KEYPAIR_TRIGGER_LOW();
 
     out[0] = (uint8_t)ret;
     simpleserial_put('K', 1, out);
@@ -268,17 +349,106 @@ static void fault_puts(const char *s)
     }
 }
 
+#if SS_VER == SS_VER_2_1
+static uint8_t cmd_debug_decode_msg(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *buf)
+#else
+static uint8_t cmd_debug_decode_msg(uint8_t *buf, uint8_t len)
+#endif
+{
+#if SS_VER == SS_VER_2_1
+    (void)cmd;
+    (void)scmd;
+#endif
+    (void)len;
+    (void)buf;
+
+    uint8_t m_dec[KYBER_SYMBYTES];
+
+    /*
+     * Debug-only command:
+     * Directly run IND-CPA decryption on the current global ciphertext ct.
+     *
+     * Since the decoder trigger has already been inserted around poly_tomsg()
+     * inside m4fspeed/indcpa.c, this command will produce the same decoder
+     * trigger, but returns the decoded message instead of the shared secret.
+     *
+     * The KEM secret key layout starts with the IND-CPA secret key, so passing
+     * sk here is consistent with crypto_kem_dec().
+     */
+    indcpa_dec(m_dec, ct, sk);
+
+    simpleserial_put('M', KYBER_SYMBYTES, m_dec);
+    return 0x00;
+}
+
+#if SS_VER == SS_VER_2_1
+static uint8_t cmd_read_indcpa_sk_chunk(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *buf)
+#else
+static uint8_t cmd_read_indcpa_sk_chunk(uint8_t *buf, uint8_t len)
+#endif
+{
+#if SS_VER == SS_VER_2_1
+    (void)cmd;
+    (void)scmd;
+#endif
+
+    /*
+     * Debug-only command.
+     *
+     * Payload:
+     *   buf[0] = offset low byte
+     *   buf[1] = offset high byte
+     *   buf[2] = requested length, ignored except for compatibility
+     *
+     * Response:
+     *   command 'Z'
+     *   up to 128 bytes from sk[0 : KYBER_INDCPA_SECRETKEYBYTES]
+     *
+     * Kyber KEM secret-key layout:
+     *   sk[0 : KYBER_INDCPA_SECRETKEYBYTES] is the IND-CPA secret key.
+     *
+     * Important:
+     *   This is raw serialized IND-CPA sk, i.e. NTT-domain polyvec bytes.
+     *   Host side should decode it with polyvec_frombytes() and apply inverse NTT
+     *   before using it as small secret coefficients.
+     */
+
+    if (len < 2) {
+        uint8_t err = 0xff;
+        simpleserial_put('Z', 1, &err);
+        return 0x00;
+    }
+
+    uint16_t offset = ((uint16_t)buf[0]) | (((uint16_t)buf[1]) << 8);
+
+    if (offset >= KYBER_INDCPA_SECRETKEYBYTES) {
+        uint8_t err = 0xfe;
+        simpleserial_put('Z', 1, &err);
+        return 0x00;
+    }
+
+    uint16_t remaining = KYBER_INDCPA_SECRETKEYBYTES - offset;
+    uint8_t out_len = INDCPA_SK_CHUNK;
+
+    if (remaining < INDCPA_SK_CHUNK) {
+        out_len = (uint8_t)remaining;
+    }
+
+    simpleserial_put('Z', out_len, sk + offset);
+    return 0x00;
+}
+
 
 void HardFault_Handler(void)
 {
     fault_puts("rHARDFAULT\n");
 
     while (1) {
-        trigger_high();
+        PROBE_FAULT_TRIGGER_HIGH();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
-        trigger_low();
+        PROBE_FAULT_TRIGGER_LOW();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
@@ -291,11 +461,11 @@ void BusFault_Handler(void)
     fault_puts("rBUSFAULT\n");
 
     while (1) {
-        trigger_high();
+        PROBE_FAULT_TRIGGER_HIGH();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
-        trigger_low();
+        PROBE_FAULT_TRIGGER_LOW();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
@@ -308,11 +478,11 @@ void UsageFault_Handler(void)
     fault_puts("rUSAGEFAULT\n");
 
     while (1) {
-        trigger_high();
+        PROBE_FAULT_TRIGGER_HIGH();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
-        trigger_low();
+        PROBE_FAULT_TRIGGER_LOW();
         for (volatile uint32_t i = 0; i < 100000; i++) {
             __asm volatile("nop");
         }
@@ -348,6 +518,8 @@ int main(void)
     simpleserial_addcmd('D', 0, cmd_decaps_probe);
     simpleserial_addcmd('T', 3, cmd_read_ct);
     simpleserial_addcmd('C', 2 + CT_CHUNK, cmd_load_ct);
+    simpleserial_addcmd('M', 0, cmd_debug_decode_msg);
+    simpleserial_addcmd('Z', 3, cmd_read_indcpa_sk_chunk);
     uart_puts("rKYBERPROBE_C\n");
 
     while (1) {
