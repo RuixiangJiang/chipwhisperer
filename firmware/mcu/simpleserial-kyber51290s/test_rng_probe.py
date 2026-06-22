@@ -2,6 +2,7 @@
 
 import time
 import chipwhisperer as cw
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, DEFAULT_BAUD
 
 
 def reset_target(scope) -> None:
@@ -19,13 +20,14 @@ def main() -> None:
     scope = cw.scope()
     scope.default_setup()
 
-    scope.clock.clkgen_freq = 7.3728e6
-    scope.io.hs2 = "clkgen"
+    scope.clock.clkgen_freq = CLKGEN_FREQ
+    scope.clock.adc_src = ADC_SRC
+    scope.io.hs2 = HS2_NORMAL
 
     scope.io.tio1 = "serial_rx"
     scope.io.tio2 = "serial_tx"
 
-    target = cw.target(scope, cw.targets.SimpleSerial2)
+    target = cw.target(scope, cw.targets.SimpleSerial2, baud=DEFAULT_BAUD)
     target.flush()
 
     reset_target(scope)

@@ -1,0 +1,7 @@
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
+
+print("CLKGEN_FREQ:", CLKGEN_FREQ)
+print("ADC_SRC:", ADC_SRC)
+print("HS2_NORMAL:", HS2_NORMAL)
+print("HS2_GLITCH:", HS2_GLITCH)
+print("DEFAULT_BAUD:", DEFAULT_BAUD)

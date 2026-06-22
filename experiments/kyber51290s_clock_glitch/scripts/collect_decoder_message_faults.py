@@ -39,6 +39,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -409,7 +411,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p.add_argument("--platform", default="CWLITEARM")
     p.add_argument("--ss-version", default="SS_VER_2_1")
-    p.add_argument("--clkgen-freq", type=float, default=7.3728e6)
+    p.add_argument("--clkgen-freq", type=float, default=CLKGEN_FREQ)
     p.add_argument("--adc-samples", type=int, default=5000)
     p.add_argument("--adc-timeout", type=float, default=2.0)
     p.add_argument("--decode-timeout", type=float, default=10.0)

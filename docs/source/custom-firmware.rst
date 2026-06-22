@@ -88,7 +88,7 @@ plaintext and send it back. Our project files typically support both simpleseria
             return 0x04; // SS_ERR_LEN
         }
 
-        trigger_high();
+        
         for (uint8_t i = 0; i < 16; i++) {
             buf[i] ^= key[i]; // do "encryption"
         }

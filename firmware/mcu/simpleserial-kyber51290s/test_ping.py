@@ -2,6 +2,7 @@
 
 import time
 import chipwhisperer as cw
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, DEFAULT_BAUD
 
 
 def reset_target(scope) -> None:
@@ -16,8 +17,9 @@ def configure_scope(scope) -> None:
     """Configure clock, UART pins, and reset the target."""
     scope.default_setup()
 
-    scope.clock.clkgen_freq = 7.3728e6
-    scope.io.hs2 = "clkgen"
+    scope.clock.clkgen_freq = CLKGEN_FREQ
+    scope.clock.adc_src = ADC_SRC
+    scope.io.hs2 = HS2_NORMAL
 
     scope.io.tio1 = "serial_rx"
     scope.io.tio2 = "serial_tx"
@@ -29,7 +31,7 @@ def test_ss2(scope) -> None:
     """Test SimpleSerial v2.1."""
     print("Testing SimpleSerial2...")
 
-    target = cw.target(scope, cw.targets.SimpleSerial2)
+    target = cw.target(scope, cw.targets.SimpleSerial2, baud=DEFAULT_BAUD)
     target.flush()
 
     target.simpleserial_write("P", bytearray([]))
@@ -48,7 +50,7 @@ def test_ss1(scope) -> None:
     """Test SimpleSerial v1.1 as a fallback check."""
     print("Testing SimpleSerial1...")
 
-    target = cw.target(scope, cw.targets.SimpleSerial)
+    target = cw.target(scope, cw.targets.SimpleSerial, baud=DEFAULT_BAUD)
     target.flush()
 
     target.simpleserial_write("P", bytearray([]))

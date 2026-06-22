@@ -41,6 +41,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from common_cw import setup_scope_and_target, recover_target, disconnect  # noqa: E402
 from kyber_target import KyberTarget  # noqa: E402
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
 
 
 SS_LEN = 32
@@ -148,7 +149,7 @@ def configure_glitch(scope: Any, args: argparse.Namespace) -> None:
 
     # Route target clock through glitch module.
     # With trigger_src="manual", no external-triggered glitch is emitted during prep.
-    scope.io.hs2 = "glitch"
+    scope.io.hs2 = HS2_GLITCH
 
 
 def set_prep_mode(scope: Any) -> None:
@@ -161,7 +162,7 @@ def set_attack_mode(scope: Any, args: argparse.Namespace) -> None:
     scope.glitch.repeat = args.repeat
     scope.glitch.ext_offset = args.ext_offset
     scope.glitch.trigger_src = "ext_single"
-    scope.io.hs2 = "glitch"
+    scope.io.hs2 = HS2_GLITCH
 
 
 def ping_alive(kt: KyberTarget) -> bool:
@@ -354,7 +355,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--ext-offset", type=int, default=2402)
 
     p.add_argument("--ss-version", default="SS_VER_2_1")
-    p.add_argument("--clkgen-freq", type=float, default=7.3728e6)
+    p.add_argument("--clkgen-freq", type=float, default=CLKGEN_FREQ)
     p.add_argument("--adc-samples", type=int, default=5000)
     p.add_argument("--adc-timeout", type=float, default=2.0)
     p.add_argument("--decaps-timeout", type=float, default=10.0)

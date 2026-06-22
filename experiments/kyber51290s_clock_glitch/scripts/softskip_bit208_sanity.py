@@ -36,8 +36,6 @@ from typing import Any
 
 import numpy as np
 
-from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -45,14 +43,14 @@ from common_cw import flush_target  # noqa: E402
 from common_ss2 import validate_response  # noqa: E402
 from kyber_target import KyberTarget  # noqa: E402
 
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
+
 from collect_host_faults import (  # noqa: E402
     build_host_helper,
     host_encapsulate,
     connect_scope_and_target,
     safe_recover,
-    configure_glitch,
     set_prep_mode,
-    set_attack_mode,
     ping_alive,
     upload_ct,
     disconnect,
@@ -343,7 +341,7 @@ def glitched_m_decode(
     m_host: bytes,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    set_attack_mode(scope, args)
+    set_prep_mode(scope)
 
     row: dict[str, Any] = {
         "classification": "",
@@ -363,16 +361,15 @@ def glitched_m_decode(
     t0 = time.perf_counter()
 
     try:
-        scope.arm()
+        try:
+            target.flush()
+        except Exception:
+            pass
+
         target.simpleserial_write("M", bytearray([]))
 
-        scope_timeout = bool(scope.capture())
-        row["scope_timeout"] = int(scope_timeout)
-
-        try:
-            row["trigger_count"] = int(scope.adc.trig_count)
-        except Exception:
-            row["trigger_count"] = ""
+        row["scope_timeout"] = 0
+        row["trigger_count"] = ""
 
         resp = read_m_response(target, args.decode_timeout)
 
@@ -687,7 +684,10 @@ def main() -> int:
         kt = KyberTarget(target)
 
         safe_recover(scope, target, args)
-        configure_glitch(scope, args)
+        try:
+            scope.io.hs2 = HS2_NORMAL
+        except Exception:
+            pass
 
         for width in widths:
             for offset in offsets:
@@ -700,7 +700,10 @@ def main() -> int:
                         args.repeat = repeat
                         args.ext_offset = ext_offset
 
-                        configure_glitch(scope, args)
+                        try:
+                            scope.io.hs2 = HS2_NORMAL
+                        except Exception:
+                            pass
 
                         if args.new_key_every_point:
                             need_key = True
@@ -849,7 +852,10 @@ def main() -> int:
                                         raise RuntimeError("target crashed")
 
                                     safe_recover(scope, target, args)
-                                    configure_glitch(scope, args)
+                                    try:
+                                        scope.io.hs2 = HS2_NORMAL
+                                    except Exception:
+                                        pass
                                     need_key = True
 
                                     keypair_id += 1
@@ -873,7 +879,10 @@ def main() -> int:
                                 row_writer.writerow(row)
 
                                 safe_recover(scope, target, args)
-                                configure_glitch(scope, args)
+                                try:
+                                    scope.io.hs2 = HS2_NORMAL
+                                except Exception:
+                                    pass
 
                                 keypair_id += 1
                                 pk, pk_hash, secret = generate_keypair_and_secret(

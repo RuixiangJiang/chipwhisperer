@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -83,7 +85,7 @@ def parse_args():
         default="",
         help="Output directory. Default: data/secrets/indcpa_sk_<timestamp>",
     )
-    ap.add_argument("--clkgen-freq", type=float, default=7.3728e6)
+    ap.add_argument("--clkgen-freq", type=float, default=CLKGEN_FREQ)
     ap.add_argument("--adc-samples", type=int, default=5000)
     ap.add_argument("--adc-timeout", type=float, default=2.0)
     return ap.parse_args()
