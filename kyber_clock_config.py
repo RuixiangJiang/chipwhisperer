@@ -3,7 +3,7 @@
 
 # Original working default was about 7.3728 MHz.
 # For low-clock experiments, use 3.6864e6 first.
-CLKGEN_FREQ = 3.6864e6
+CLKGEN_FREQ = 7.3728e6
 
 # ADC clock source. Keep x4 unless you have a reason to change it.
 ADC_SRC = "clkgen_x4"

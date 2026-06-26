@@ -911,7 +911,7 @@ def main() -> int:
 
                         denom = residual_negative + residual_positive_or_zero
                         neg_rate = residual_negative / denom if denom else 0.0
-                        score = single_bit_target_mbit * abs(neg_rate - 0.5)
+                        score = single_bit_target_mbit * max(0.0, neg_rate - 0.5)
 
                         summary = {
                             "point_id": point_id,

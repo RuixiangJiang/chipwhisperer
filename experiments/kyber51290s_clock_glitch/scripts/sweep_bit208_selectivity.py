@@ -111,6 +111,105 @@ def parse_float_list(s: str) -> list[float]:
 def parse_int_list(s: str) -> list[int]:
     return [int(x.strip()) for x in s.split(",") if x.strip()]
 
+def safe_getattr(obj: Any, name: str, default: Any = "") -> Any:
+    try:
+        return getattr(obj, name)
+    except Exception:
+        return default
+
+
+def get_glitch_state(scope: Any) -> dict[str, Any]:
+    """Return the actual CW glitch/routing state for logging/debugging."""
+    g = safe_getattr(scope, "glitch", None)
+    io = safe_getattr(scope, "io", None)
+
+    if g is None:
+        return {
+            "actual_hs2": safe_getattr(io, "hs2", ""),
+            "actual_glitch_width": "",
+            "actual_glitch_offset": "",
+            "actual_glitch_ext_offset": "",
+            "actual_glitch_repeat": "",
+            "actual_glitch_output": "",
+            "actual_glitch_clk_src": "",
+            "actual_glitch_trigger_src": "",
+        }
+
+    return {
+        "actual_hs2": safe_getattr(io, "hs2", ""),
+        "actual_glitch_width": safe_getattr(g, "width", ""),
+        "actual_glitch_offset": safe_getattr(g, "offset", ""),
+        "actual_glitch_ext_offset": safe_getattr(g, "ext_offset", ""),
+        "actual_glitch_repeat": safe_getattr(g, "repeat", ""),
+        "actual_glitch_output": safe_getattr(g, "output", ""),
+        "actual_glitch_clk_src": safe_getattr(g, "clk_src", ""),
+        "actual_glitch_trigger_src": safe_getattr(g, "trigger_src", ""),
+    }
+
+
+def force_glitch_route(scope: Any, args: argparse.Namespace) -> dict[str, Any]:
+    """
+    Make the currently selected parameter point active on the target clock.
+
+    This is intentionally redundant with collect_host_faults.configure_glitch()
+    and set_attack_mode(): after crashes/recovery, scripts may leave hs2 at
+    "clkgen". For every glitched M decode, force hs2 back to glitch and rewrite
+    the current width/offset/repeat/ext_offset.
+    """
+    # Re-apply glitch module settings for the current point.
+    try:
+        scope.glitch.output = args.glitch_output
+    except Exception:
+        pass
+
+    try:
+        scope.glitch.clk_src = "clkgen"
+    except Exception:
+        pass
+
+    try:
+        scope.glitch.trigger_src = "ext_single"
+    except Exception:
+        pass
+
+    for attr in ("width", "offset", "repeat", "ext_offset"):
+        try:
+            setattr(scope.glitch, attr, getattr(args, attr))
+        except Exception:
+            pass
+
+    # This is the critical routing setting: target must receive glitch output.
+    try:
+        scope.io.hs2 = HS2_GLITCH
+    except Exception:
+        pass
+
+    time.sleep(0.005)
+    return get_glitch_state(scope)
+
+
+def force_prep_route(scope: Any) -> None:
+    """Return target clock routing to normal clkgen for non-glitched commands."""
+    try:
+        scope.io.hs2 = HS2_NORMAL
+    except Exception:
+        pass
+    time.sleep(0.005)
+
+
+def glitch_state_short(state: dict[str, Any]) -> str:
+    return (
+        f"hs2={state.get('actual_hs2')} "
+        f"out={state.get('actual_glitch_output')} "
+        f"clk={state.get('actual_glitch_clk_src')} "
+        f"trig={state.get('actual_glitch_trigger_src')} "
+        f"w={state.get('actual_glitch_width')} "
+        f"off={state.get('actual_glitch_offset')} "
+        f"ext={state.get('actual_glitch_ext_offset')} "
+        f"rep={state.get('actual_glitch_repeat')}"
+    )
+
+
 
 def inclusive_range(start: int, stop: int, step: int) -> list[int]:
     if step == 0:
@@ -343,8 +442,6 @@ def glitched_m_decode(
     m_host: bytes,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    set_attack_mode(scope, args)
-
     row: dict[str, Any] = {
         "classification": "",
         "m_dec_hex": "",
@@ -357,12 +454,27 @@ def glitched_m_decode(
         "elapsed_ms": "",
         "full_response_hex": "",
         "rv_hex": "",
+        "actual_hs2": "",
+        "actual_glitch_width": "",
+        "actual_glitch_offset": "",
+        "actual_glitch_ext_offset": "",
+        "actual_glitch_repeat": "",
+        "actual_glitch_output": "",
+        "actual_glitch_clk_src": "",
+        "actual_glitch_trigger_src": "",
         "error": "",
     }
 
     t0 = time.perf_counter()
 
     try:
+        set_attack_mode(scope, args)
+        state = force_glitch_route(scope, args)
+        row.update(state)
+
+        if args.strict_glitch_route and state.get("actual_hs2") != HS2_GLITCH:
+            raise RuntimeError(f"hs2 is not routed to glitch: {state}")
+
         scope.arm()
         target.simpleserial_write("M", bytearray([]))
 
@@ -413,6 +525,7 @@ def glitched_m_decode(
 
     finally:
         set_prep_mode(scope)
+        force_prep_route(scope)
 
 
 def start_intermediate_helper(args: argparse.Namespace, out_dir: Path):
@@ -539,6 +652,22 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--adc-timeout", type=float, default=2.0)
     p.add_argument("--decode-timeout", type=float, default=10.0)
     p.add_argument("--glitch-output", default="clock_xor")
+    p.add_argument(
+        "--debug-glitch-config",
+        action="store_true",
+        help="Print actual glitch/routing state at selected points.",
+    )
+    p.add_argument(
+        "--glitch-debug-every",
+        type=int,
+        default=100,
+        help="When --debug-glitch-config is set, print one point every N points.",
+    )
+    p.add_argument(
+        "--strict-glitch-route",
+        action="store_true",
+        help="Raise if hs2 is not routed to glitch during a glitched capture.",
+    )
 
     p.add_argument("--out-dir", default="")
     p.add_argument("--progress-interval", type=int, default=50)
@@ -592,6 +721,13 @@ def main() -> int:
         "repeats": repeats,
         "ext_offsets": ext_offsets,
         "score": "single_bit_mbit_count * abs(residual_negative_rate - 0.5)",
+        "clock_config": {
+            "CLKGEN_FREQ": CLKGEN_FREQ,
+            "ADC_SRC": ADC_SRC,
+            "HS2_NORMAL": HS2_NORMAL,
+            "HS2_GLITCH": HS2_GLITCH,
+            "DEFAULT_BAUD": DEFAULT_BAUD,
+        },
     })
 
     (out_dir / "metadata.json").write_text(
@@ -633,6 +769,14 @@ def main() -> int:
         "residual_sign",
         "v_centered",
         "ct_sha256",
+        "actual_hs2",
+        "actual_glitch_width",
+        "actual_glitch_offset",
+        "actual_glitch_ext_offset",
+        "actual_glitch_repeat",
+        "actual_glitch_output",
+        "actual_glitch_clk_src",
+        "actual_glitch_trigger_src",
         "error",
     ]
 
@@ -702,6 +846,15 @@ def main() -> int:
 
                         configure_glitch(scope, args)
 
+                        if args.debug_glitch_config and (
+                            point_id <= 5
+                            or args.glitch_debug_every <= 1
+                            or point_id % args.glitch_debug_every == 0
+                        ):
+                            # Do not leave hs2 in glitch mode here: keypair/upload still use prep mode.
+                            state = get_glitch_state(scope)
+                            print("[point pre-capture cfg]", glitch_state_short(state))
+
                         if args.new_key_every_point:
                             need_key = True
 
@@ -757,6 +910,14 @@ def main() -> int:
                                 "residual_sign": "",
                                 "v_centered": "",
                                 "ct_sha256": "",
+                                "actual_hs2": "",
+                                "actual_glitch_width": "",
+                                "actual_glitch_offset": "",
+                                "actual_glitch_ext_offset": "",
+                                "actual_glitch_repeat": "",
+                                "actual_glitch_output": "",
+                                "actual_glitch_clk_src": "",
+                                "actual_glitch_trigger_src": "",
                                 "error": "",
                             }
 
@@ -793,6 +954,14 @@ def main() -> int:
                                 row["trigger_count"] = dec.get("trigger_count", "")
                                 row["scope_timeout"] = dec.get("scope_timeout", "")
                                 row["elapsed_ms"] = dec.get("elapsed_ms", "")
+                                row["actual_hs2"] = dec.get("actual_hs2", "")
+                                row["actual_glitch_width"] = dec.get("actual_glitch_width", "")
+                                row["actual_glitch_offset"] = dec.get("actual_glitch_offset", "")
+                                row["actual_glitch_ext_offset"] = dec.get("actual_glitch_ext_offset", "")
+                                row["actual_glitch_repeat"] = dec.get("actual_glitch_repeat", "")
+                                row["actual_glitch_output"] = dec.get("actual_glitch_output", "")
+                                row["actual_glitch_clk_src"] = dec.get("actual_glitch_clk_src", "")
+                                row["actual_glitch_trigger_src"] = dec.get("actual_glitch_trigger_src", "")
                                 row["bit_diff_count"] = dec.get("bit_diff_count", "")
                                 row["bit_diff_positions"] = dec.get("bit_diff_positions", "")
                                 row["first_bit_diff"] = dec.get("first_bit_diff", "")
@@ -902,7 +1071,7 @@ def main() -> int:
 
                         denom = residual_negative + residual_positive_or_zero
                         neg_rate = residual_negative / denom if denom else 0.0
-                        score = single_bit_target_mbit * abs(neg_rate - 0.5)
+                        score = single_bit_target_mbit * max(0.0, neg_rate - 0.5)
 
                         summary = {
                             "point_id": point_id,
