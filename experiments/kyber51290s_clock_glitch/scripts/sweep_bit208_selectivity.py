@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sweep glitch parameters and measure bit-208 fault-model selectivity.
+Formal sweep script for bit-208 fault-model selectivity.
 
 Goal:
     Find a glitch setting that still produces single-bit208 message faults,
@@ -13,7 +13,7 @@ For m_bit = 1, the desired skip-(+q/2) model predicts:
 So we score each parameter by:
     single_bit208_mbit1_count
     residual_negative_rate among those samples
-    score = count * abs(residual_negative_rate - 0.5)
+    score = count * max(0, residual_negative_rate - 0.5)
 
 This script requires debug firmware commands:
     M: return decoded message m_dec
@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import chipwhisperer as cw
 
 from kyber_clock_config import CLKGEN_FREQ, ADC_SRC, HS2_NORMAL, HS2_GLITCH, DEFAULT_BAUD
 
@@ -74,9 +75,42 @@ M_LEN = 32
 PK_LEN = 800
 INDCPA_SK_LEN = 768
 SK_CHUNK = 128
+PK_CHUNK = 200
 
 MONT_INV = 169
 MU_ONE = 1665
+
+
+def log_debug(args: argparse.Namespace, *items: Any) -> None:
+    """Print debug messages only when --debug is enabled."""
+    if getattr(args, "debug", False):
+        print(*items)
+
+
+def progress_bar_line(
+    *,
+    point_id: int,
+    point_trial: int,
+    trials_per_point: int,
+    counts: Counter[str],
+    single_bit_target: int,
+    single_bit_target_mbit: int,
+    residual_negative: int,
+    residual_positive_or_zero: int,
+    m_bit_filter: int,
+) -> str:
+    """Return a compact one-line progress bar for the current point."""
+    bar_len = 24
+    done = int(round(bar_len * point_trial / max(1, trials_per_point)))
+    bar = "#" * done + "-" * (bar_len - done)
+    return (
+        f"point={point_id} {point_trial}/{trials_per_point} [{bar}] "
+        f"wrong={counts['message_wrong']} "
+        f"single208={single_bit_target} "
+        f"single208_mbit{m_bit_filter}={single_bit_target_mbit} "
+        f"neg={residual_negative} pos0={residual_positive_or_zero} "
+        f"crash={counts['crash']} host_exc={counts['host_exception']}"
+    )
 
 
 def now_stamp() -> str:
@@ -195,6 +229,236 @@ def force_prep_route(scope: Any) -> None:
     except Exception:
         pass
     time.sleep(0.005)
+
+
+def manual_connect_scope_and_target(args: argparse.Namespace) -> tuple[Any, Any]:
+    """
+    Bring up CW-Lite + SimpleSerial2 using the same minimal sequence as the
+    hand-tested high-clock P/K script. This intentionally bypasses
+    collect_host_faults.connect_scope_and_target(), because that helper can
+    touch glitch/MMCM state before the first keypair.
+    """
+    scope = cw.scope()
+
+    # Match the manual high-clock bring-up first.
+    try:
+        scope.clock.clkgen_freq = args.clkgen_freq
+    except Exception:
+        pass
+    try:
+        scope.clock.adc_src = ADC_SRC
+    except Exception:
+        pass
+    try:
+        scope.io.hs2 = HS2_NORMAL
+        scope.io.tio1 = "serial_rx"
+        scope.io.tio2 = "serial_tx"
+    except Exception:
+        pass
+
+    # Do not touch ADC/gain/glitch settings before K.
+    # The known-good standalone P/K test only configures target clock + UART IO.
+    # Capture settings are applied later, immediately before glitched M captures.
+
+    target = cw.target(scope, cw.targets.SimpleSerial2)
+    force_target_baud_local(target, DEFAULT_BAUD)
+
+    # Same reset style as the known-good manual ping/K script.
+    scope.io.nrst = "low"
+    time.sleep(0.1)
+    scope.io.nrst = "high_z"
+    time.sleep(max(float(getattr(args, "reset_delay", 0.8)), 0.8))
+
+    try:
+        flush_target(target)
+    except Exception:
+        pass
+
+    log_debug(
+        args,
+        "[manual connect]",
+        "clkgen=", safe_getattr(scope.clock, "clkgen_freq", ""),
+        "adc=", safe_getattr(scope.clock, "adc_freq", ""),
+        "hs2=", safe_getattr(scope.io, "hs2", ""),
+        "tio1=", safe_getattr(scope.io, "tio1", ""),
+        "tio2=", safe_getattr(scope.io, "tio2", ""),
+    )
+
+    return scope, target
+
+
+def configure_capture_settings(scope: Any, args: argparse.Namespace) -> None:
+    """Apply ADC/gain settings only when we are about to capture/glitch."""
+    try:
+        scope.gain.mode = "high"
+        scope.gain.gain = 30
+    except Exception:
+        pass
+    try:
+        scope.adc.samples = args.adc_samples
+        scope.adc.timeout = args.adc_timeout
+        scope.adc.basic_mode = "rising_edge"
+    except Exception:
+        pass
+
+
+def direct_attack_mode(scope: Any, args: argparse.Namespace) -> None:
+    """Configure the glitch path directly, without collect_host_faults.set_attack_mode()."""
+    configure_capture_settings(scope, args)
+    try:
+        scope.clock.clkgen_freq = args.clkgen_freq
+    except Exception:
+        pass
+    try:
+        scope.clock.adc_src = ADC_SRC
+    except Exception:
+        pass
+    try:
+        scope.glitch.output = args.glitch_output
+    except Exception:
+        pass
+    try:
+        scope.glitch.clk_src = "clkgen"
+    except Exception:
+        pass
+    try:
+        scope.glitch.trigger_src = "ext_single"
+    except Exception:
+        pass
+    try:
+        scope.glitch.width = args.width
+        scope.glitch.offset = args.offset
+        scope.glitch.repeat = args.repeat
+        scope.glitch.ext_offset = args.ext_offset
+    except Exception:
+        pass
+    try:
+        scope.io.hs2 = HS2_GLITCH
+    except Exception:
+        pass
+    time.sleep(0.005)
+
+
+def force_target_baud_local(target: Any, baud: int = DEFAULT_BAUD) -> None:
+    """
+    Robust baud setter for this ChipWhisperer version.
+
+    In the user's current CW version, target.ser.baud is a method rather than a
+    simple attribute. This helper tries the method form first and then falls
+    back to attribute-style setters.
+    """
+    try:
+        ser = getattr(target, "ser", None)
+        if ser is not None:
+            baud_obj = getattr(ser, "baud", None)
+            if callable(baud_obj):
+                baud_obj(baud)
+                return
+    except Exception:
+        pass
+
+    for obj in (getattr(target, "ser", None), target):
+        if obj is None:
+            continue
+        for attr in ("baud", "baudrate"):
+            try:
+                setattr(obj, attr, baud)
+                return
+            except Exception:
+                pass
+
+
+def hard_prep_mode(
+    scope: Any,
+    target: Any,
+    args: argparse.Namespace,
+    *,
+    reset: bool = False,
+    delay: float = 0.8,
+) -> None:
+    """
+    Force normal, non-glitch communication state.
+
+    Use reset=True before generating a fresh keypair, because K/Z preparation
+    can safely start from a fresh target. Do not use reset=True after a keypair
+    has been generated unless you also regenerate the key, since the Kyber
+    secret key is stored in target RAM.
+    """
+    # Intentionally do NOT call collect_host_faults.set_prep_mode() here.
+    # The hand-tested high-clock P/K sequence only programs the clock/IO route
+    # directly. set_prep_mode() may have side effects from previous glitch code
+    # paths, so this helper mirrors the known-good manual bring-up sequence.
+
+    try:
+        scope.clock.clkgen_freq = args.clkgen_freq
+    except Exception:
+        pass
+    try:
+        scope.clock.adc_src = ADC_SRC
+    except Exception:
+        pass
+    try:
+        scope.io.hs2 = HS2_NORMAL
+    except Exception:
+        pass
+    try:
+        scope.io.tio1 = "serial_rx"
+        scope.io.tio2 = "serial_tx"
+    except Exception:
+        pass
+
+    force_target_baud_local(target, DEFAULT_BAUD)
+
+    if reset:
+        try:
+            scope.io.nrst = "low"
+            time.sleep(0.1)
+            scope.io.nrst = "high_z"
+        except Exception:
+            pass
+        time.sleep(delay)
+    else:
+        time.sleep(delay)
+
+    try:
+        flush_target(target)
+    except Exception:
+        pass
+
+
+def soft_prep_no_clock(scope: Any, target: Any, *, delay: float = 0.05) -> None:
+    """
+    Return to normal command route without touching clkgen_freq/adc_src.
+
+    After K has generated keys in RAM, repeatedly assigning scope.clock.clkgen_freq
+    can momentarily disturb the target clock.  Standalone P/K/R tests succeed
+    without reprogramming clock before R, so use this lightweight prep for R/Z/C.
+    """
+    try:
+        scope.io.hs2 = HS2_NORMAL
+    except Exception:
+        pass
+
+    time.sleep(delay)
+
+    try:
+        flush_target(target)
+    except Exception:
+        pass
+
+
+
+def ping_once(target: Any, timeout: float = 2.0) -> dict[str, Any]:
+    """Send P and return the raw SimpleSerial2 response dictionary."""
+    flush_target(target)
+    target.simpleserial_write("P", bytearray([]))
+    resp = target.simpleserial_read_witherrors("P", 1, glitch_timeout=timeout)
+    return resp if isinstance(resp, dict) else {
+        "valid": True,
+        "payload": to_bytes(resp),
+        "full_response": b"",
+        "rv": b"",
+    }
 
 
 def glitch_state_short(state: dict[str, Any]) -> str:
@@ -373,6 +637,176 @@ def decode_secret_raw(
     return arr
 
 
+def read_public_key_chunk_manual(target: Any, offset: int, timeout: float = 10.0, debug: bool = False) -> bytes:
+    """
+    Read one public-key chunk using the firmware R command directly.
+
+    This mirrors the debug firmware protocol used by Z:
+        payload[0] = offset low byte
+        payload[1] = offset high byte
+        payload[2] = requested length
+
+    We avoid KyberTarget.read_public_key()/common_ss2.read_chunked here because
+    that wrapper may not match the current R command payload format.
+    """
+    expected = min(PK_CHUNK, PK_LEN - offset)
+    if expected <= 0:
+        return b""
+
+    payload = bytearray([
+        offset & 0xFF,
+        (offset >> 8) & 0xFF,
+        expected & 0xFF,
+    ])
+
+    flush_target(target)
+    time.sleep(0.02)
+    target.simpleserial_write("R", payload)
+
+    resp = target.simpleserial_read_witherrors(
+        "R",
+        expected,
+        glitch_timeout=timeout,
+    )
+
+    if debug:
+        print(
+            f"[DEBUG R chunk] off={offset} len={expected} resp=",
+            {
+                "valid": resp.get("valid") if isinstance(resp, dict) else True,
+                "payload_len": len(resp.get("payload") or b"") if isinstance(resp, dict) else len(resp or b""),
+                "full_response": resp.get("full_response") if isinstance(resp, dict) else b"",
+                "rv": resp.get("rv") if isinstance(resp, dict) else b"",
+            },
+        )
+
+    packet = validate_response(resp, "R", expected)
+    data = bytes(packet.payload)
+    if len(data) != expected:
+        raise RuntimeError(
+            f"bad R chunk at offset={offset}: got {len(data)}, expected {expected}"
+        )
+    return data
+
+
+def read_public_key_manual(target: Any, debug: bool = False) -> bytes:
+    chunks: list[bytes] = []
+    for offset in range(0, PK_LEN, PK_CHUNK):
+        chunks.append(read_public_key_chunk_manual(target, offset, debug=debug))
+    pk = b"".join(chunks)
+    if len(pk) != PK_LEN:
+        raise RuntimeError(f"bad pk length: {len(pk)}")
+    return pk
+
+
+def read_public_key_with_retries(
+    scope: Any,
+    target: Any,
+    kt: KyberTarget,
+    args: argparse.Namespace,
+    *,
+    retries: int = 3,
+) -> bytes:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            # Do not reprogram clkgen/adc_src here.  Standalone R succeeds by
+            # only flushing and sending R after K.
+            soft_prep_no_clock(scope, target, delay=0.10)
+            log_debug(args, f"[DEBUG R/read_pk manual attempt {attempt}]")
+            pk = read_public_key_manual(target, debug=getattr(args, "debug", False))
+            if len(pk) != PK_LEN:
+                raise RuntimeError(f"bad pk length: {len(pk)}")
+            return pk
+        except Exception as e:
+            last_err = e
+            log_debug(args, f"[WARN] R/read_pk manual attempt {attempt} failed:", repr(e))
+
+            # Do not reset here: K has already generated pk/sk in RAM.
+            # Check that the parser is still alive, then retry R.
+            try:
+                p = ping_once(target, timeout=2.0)
+                log_debug(args, "[DEBUG P after failed R]", p)
+            except Exception as pe:
+                log_debug(args, "[WARN] P after failed R raised:", repr(pe))
+
+            soft_prep_no_clock(scope, target, delay=0.25)
+    raise RuntimeError(f"read_public_key failed after {retries} retries: {last_err!r}")
+
+
+def dump_indcpa_secret_raw_with_retries(
+    scope: Any,
+    target: Any,
+    args: argparse.Namespace,
+    *,
+    retries: int = 3,
+) -> bytes:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            # Keep the already-running target clock untouched after K/R.
+            soft_prep_no_clock(scope, target, delay=0.10)
+            log_debug(args, f"[DEBUG Z/dump_sk attempt {attempt}]")
+            raw = dump_indcpa_secret_raw(target)
+            if len(raw) != INDCPA_SK_LEN:
+                raise RuntimeError(f"bad raw sk length: {len(raw)}")
+            return raw
+        except Exception as e:
+            last_err = e
+            log_debug(args, f"[WARN] Z/dump_sk attempt {attempt} failed:", repr(e))
+            soft_prep_no_clock(scope, target, delay=0.25)
+    raise RuntimeError(f"dump_indcpa_secret_raw failed after {retries} retries: {last_err!r}")
+
+
+def wait_for_ping_alive(
+    scope: Any,
+    target: Any,
+    args: argparse.Namespace,
+    *,
+    label: str,
+    attempts: int = 5,
+    reset_first: bool = False,
+    reset_between: bool = False,
+    delay: float = 0.2,
+) -> None:
+    """Wait until P responds. Optionally reset before/between attempts."""
+    reset_delay = max(float(getattr(args, "reset_delay", 0.2)), 0.8)
+    last_ping = None
+    for attempt in range(1, attempts + 1):
+        hard_prep_mode(
+            scope,
+            target,
+            args,
+            reset=(reset_first and attempt == 1) or (reset_between and attempt > 1),
+            delay=reset_delay if ((reset_first and attempt == 1) or (reset_between and attempt > 1)) else delay,
+        )
+        try:
+            last_ping = ping_once(target, timeout=2.0)
+            log_debug(args, f"[DEBUG {label} P attempt {attempt}]", last_ping)
+            if isinstance(last_ping, dict) and last_ping.get("valid", False):
+                hard_prep_mode(scope, target, args, reset=False, delay=0.1)
+                return
+        except Exception as e:
+            last_ping = repr(e)
+            log_debug(args, f"[WARN] {label} P attempt {attempt} failed:", repr(e))
+    raise RuntimeError(f"P ping failed during {label}; last={last_ping!r}")
+
+
+
+def raw_keypair_command(target: Any, timeout: float = 40.0) -> int:
+    """Issue K using the exact raw SimpleSerial2 pattern used by standalone tests."""
+    flush_target(target)
+    target.simpleserial_write("K", bytearray([]))
+    resp = target.simpleserial_read_witherrors("K", 1, glitch_timeout=timeout)
+    # raw_keypair_command is currently not used in the main flow; keep it quiet by default.
+    # Add local prints here if debugging this helper directly.
+    packet = validate_response(resp, "K", 1)
+    payload = bytes(packet.payload)
+    if len(payload) != 1:
+        raise RuntimeError(f"bad K payload length: {len(payload)}")
+    return int(payload[0])
+
+
 def generate_keypair_and_secret(
     scope: Any,
     target: Any,
@@ -381,37 +815,113 @@ def generate_keypair_and_secret(
     keypair_id: int,
     args: argparse.Namespace,
 ) -> tuple[bytes, str, np.ndarray]:
-    set_prep_mode(scope)
+    """
+    Generate a target keypair, read pk, dump raw IND-CPA sk, and decode secret.
 
-    ret = kt.keypair()
-    if ret != 0:
-        raise RuntimeError(f"K command failed with ret={ret}")
+    v9 policy:
+      - Use the exact standalone-style timing for P/K bring-up.
+      - After reset, send only ONE P before K. Do not send repeated P retries,
+        because a delayed response from P1 can be mistaken for P2 and leave the
+        SimpleSerial stream desynchronized before K.
+      - Send raw K once per transaction with a long timeout.
+      - If K fails, reset and start a fresh transaction.
+      - Once K succeeds, do not reset until R+Z are complete.
+    """
+    reset_delay = max(float(getattr(args, "reset_delay", 0.2)), 1.0)
+    transaction_last_err = None
 
-    pk = bytes(kt.read_public_key())
-    if len(pk) != PK_LEN:
-        raise RuntimeError(f"bad pk length: {len(pk)}")
+    for tx_attempt in range(1, 8):
+        log_debug(args, f"\n[KEYGEN TX attempt {tx_attempt}/7 - standalone-style]")
+        try:
+            # Exact standalone style: set clock/io, reset, wait, flush.
+            hard_prep_mode(scope, target, args, reset=True, delay=reset_delay)
 
-    pk_hash = sha256_hex(pk)
+            log_debug(
+                args,
+                "[DEBUG before standalone-style K]",
+                "clkgen=", safe_getattr(scope.clock, "clkgen_freq", ""),
+                "adc=", safe_getattr(scope.clock, "adc_freq", ""),
+                "hs2=", safe_getattr(scope.io, "hs2", ""),
+                "tio1=", safe_getattr(scope.io, "tio1", ""),
+                "tio2=", safe_getattr(scope.io, "tio2", ""),
+            )
 
-    key_dir = out_dir / "keys" / f"keypair_{keypair_id:04d}"
-    key_dir.mkdir(parents=True, exist_ok=True)
+            # Mirror the known-good standalone test: P once, then K.
+            try:
+                p1 = ping_once(target, timeout=2.0)
+                log_debug(args, "[DEBUG standalone-style P1 before K]", p1)
+            except Exception as e:
+                p1 = repr(e)
+                log_debug(args, "[WARN] standalone-style P1 before K failed:", p1)
 
-    (key_dir / "pk.bin").write_bytes(pk)
+            # Do NOT send another P here.  A second P can create a delayed-response
+            # ambiguity.  Give the target a quiet gap, then send K.
+            time.sleep(0.2)
 
-    raw = dump_indcpa_secret_raw(target)
-    raw_path = key_dir / "indcpa_sk_raw.bin"
-    raw_path.write_bytes(raw)
+            flush_target(target)
+            target.simpleserial_write("K", bytearray([]))
+            t0 = time.perf_counter()
+            kresp = target.simpleserial_read_witherrors("K", 1, glitch_timeout=60.0)
+            elapsed = time.perf_counter() - t0
+            log_debug(args, "[DEBUG standalone-style raw K response]", kresp)
+            log_debug(args, "[DEBUG standalone-style K elapsed]", elapsed)
 
-    secret = decode_secret_raw(raw_path, key_dir, args)
+            packet = validate_response(kresp, "K", 1)
+            payload = bytes(packet.payload)
+            if len(payload) != 1:
+                raise RuntimeError(f"bad K payload length: {len(payload)}")
+            ret = int(payload[0])
+            if ret != 0:
+                raise RuntimeError(f"K command returned ret={ret}")
 
-    print(
-        f"[+] New keypair_id={keypair_id}, "
-        f"pk_hash={pk_hash[:16]}..., "
-        f"secret_range=[{secret.min()}, {secret.max()}]"
+            # Standalone style: wait, then P once after K.
+            time.sleep(0.5)
+            try:
+                p2 = ping_once(target, timeout=2.0)
+                log_debug(args, "[DEBUG standalone-style P2 after K]", p2)
+            except Exception as e:
+                raise RuntimeError(f"P after K raised: {e!r}")
+            if not (isinstance(p2, dict) and p2.get("valid", False)):
+                raise RuntimeError(f"P after K invalid: {p2!r}")
+
+            # K succeeded.  Do not reset from this point until R+Z are complete.
+            # Use conservative retries for R/Z, but never reset inside them.
+            time.sleep(0.5)
+            pk = read_public_key_with_retries(scope, target, kt, args, retries=5)
+            pk_hash = sha256_hex(pk)
+
+            key_dir = out_dir / "keys" / f"keypair_{keypair_id:04d}"
+            key_dir.mkdir(parents=True, exist_ok=True)
+            (key_dir / "pk.bin").write_bytes(pk)
+
+            raw = dump_indcpa_secret_raw_with_retries(scope, target, args, retries=5)
+            raw_path = key_dir / "indcpa_sk_raw.bin"
+            raw_path.write_bytes(raw)
+
+            secret = decode_secret_raw(raw_path, key_dir, args)
+
+            print(
+                f"[+] Keypair {keypair_id} ready: "
+                f"pk_hash={pk_hash[:16]}..., "
+                f"secret_range=[{secret.min()}, {secret.max()}]"
+            )
+
+            return pk, pk_hash, secret
+
+        except Exception as e:
+            transaction_last_err = e
+            log_debug(args, f"[WARN] standalone-style keygen transaction attempt {tx_attempt} failed:", repr(e))
+            try:
+                # Give a possibly-still-running K plenty of time before reset.
+                time.sleep(1.0)
+                hard_prep_mode(scope, target, args, reset=True, delay=reset_delay)
+            except Exception as e2:
+                log_debug(args, "[WARN] hard reset after failed keygen transaction failed:", repr(e2))
+            time.sleep(0.5)
+
+    raise RuntimeError(
+        f"generate_keypair_and_secret failed after standalone-style retries: {transaction_last_err!r}"
     )
-
-    return pk, pk_hash, secret
-
 
 def read_m_response(target: Any, timeout: float) -> dict[str, Any]:
     resp = target.simpleserial_read_witherrors(
@@ -468,7 +978,7 @@ def glitched_m_decode(
     t0 = time.perf_counter()
 
     try:
-        set_attack_mode(scope, args)
+        direct_attack_mode(scope, args)
         state = force_glitch_route(scope, args)
         row.update(state)
 
@@ -524,7 +1034,14 @@ def glitched_m_decode(
         return row
 
     finally:
-        set_prep_mode(scope)
+        # Return only the target clock route to normal. Avoid set_prep_mode()
+        # here because manual high-clock communication works without it, and
+        # set_prep_mode() can introduce side effects between attack/prep phases.
+        try:
+            scope.clock.clkgen_freq = args.clkgen_freq
+            scope.clock.adc_src = ADC_SRC
+        except Exception:
+            pass
         force_prep_route(scope)
 
 
@@ -670,8 +1187,8 @@ def build_argparser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--out-dir", default="")
-    p.add_argument("--progress-interval", type=int, default=50)
-    p.add_argument("--reset-delay", type=float, default=0.2)
+    p.add_argument("--progress-interval", type=int, default=1, help="Refresh the one-line point progress every N trials; use 0 to disable.")
+    p.add_argument("--reset-delay", type=float, default=0.8)
 
     p.add_argument(
         "--new-key-every-point",
@@ -683,6 +1200,12 @@ def build_argparser() -> argparse.ArgumentParser:
         "--stop-on-crash",
         action="store_true",
         help="Stop the whole sweep on the first crash instead of recovering.",
+    )
+
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose bring-up, K/R/Z, and retry debug logs.",
     )
 
     return p
@@ -699,7 +1222,7 @@ def main() -> int:
         args.ext_offset_stop,
         args.ext_offset_step,
     )
-    
+
     args.width = widths[0]
     args.offset = offsets[0]
     args.repeat = repeats[0]
@@ -715,12 +1238,13 @@ def main() -> int:
     metadata = vars(args).copy()
     metadata.update({
         "created_at": datetime.now().isoformat(),
-        "script": "sweep_bit208_selectivity.py",
+        "script": "sweep_bit208_selectivity_formal.py",
         "widths": widths,
         "offsets": offsets,
         "repeats": repeats,
         "ext_offsets": ext_offsets,
-        "score": "single_bit_mbit_count * abs(residual_negative_rate - 0.5)",
+        "score": "single_bit_mbit_count * max(0, residual_negative_rate - 0.5)",
+        "keygen_order": "manual_connect -> K/R/Z -> build_host_helper -> start_intermediate_helper -> sweep",
         "clock_config": {
             "CLKGEN_FREQ": CLKGEN_FREQ,
             "ADC_SRC": ADC_SRC,
@@ -736,11 +1260,7 @@ def main() -> int:
     )
 
     print("[+] Output dir:", out_dir)
-
-    host_helper = build_host_helper(args, out_dir)
-    print("[+] Host helper:", host_helper)
-
-    interm_proc, interm_fields = start_intermediate_helper(args, out_dir)
+    log_debug(args, "[+] Keygen order: manual connect -> K/R/Z BEFORE host/intermediate helper build")
 
     row_csv = out_dir / "selectivity_rows.csv"
     summary_csv = out_dir / "selectivity_summary.csv"
@@ -804,15 +1324,9 @@ def main() -> int:
         "score",
     ]
 
-    row_f = row_csv.open("w", newline="", buffering=1)
-    summary_f = summary_csv.open("w", newline="", buffering=1)
-
-    row_writer = csv.DictWriter(row_f, fieldnames=row_fields)
-    summary_writer = csv.DictWriter(summary_f, fieldnames=summary_fields)
-
-    row_writer.writeheader()
-    summary_writer.writeheader()
-
+    row_f = None
+    summary_f = None
+    interm_proc = None
     scope = None
     target = None
 
@@ -827,11 +1341,47 @@ def main() -> int:
     summary_rows: list[dict[str, Any]] = []
 
     try:
-        scope, target = connect_scope_and_target(args)
+        # This must be the first hardware action.  Do not build host helpers,
+        # start subprocesses, configure ADC/gain, or touch glitch/MMCM before
+        # this K/R/Z transaction.  This is intended to match the known-good
+        # standalone high-clock P/K/R/Z test as closely as possible.
+        scope, target = manual_connect_scope_and_target(args)
         kt = KyberTarget(target)
 
-        safe_recover(scope, target, args)
-        configure_glitch(scope, args)
+        hard_prep_mode(
+            scope,
+            target,
+            args,
+            reset=True,
+            delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
+        )
+
+        keypair_id = 0
+        pk, pk_hash, secret = generate_keypair_and_secret(
+            scope=scope,
+            target=target,
+            kt=kt,
+            out_dir=out_dir,
+            keypair_id=keypair_id,
+            args=args,
+        )
+        need_key = False
+
+        # Only after the first target keypair is safely generated and dumped do
+        # we build host-side helper binaries and start the residual helper.
+        host_helper = build_host_helper(args, out_dir)
+        print("[+] Host helper:", host_helper)
+
+        interm_proc, interm_fields = start_intermediate_helper(args, out_dir)
+
+        row_f = row_csv.open("w", newline="", buffering=1)
+        summary_f = summary_csv.open("w", newline="", buffering=1)
+
+        row_writer = csv.DictWriter(row_f, fieldnames=row_fields)
+        summary_writer = csv.DictWriter(summary_f, fieldnames=summary_fields)
+
+        row_writer.writeheader()
+        summary_writer.writeheader()
 
         for width in widths:
             for offset in offsets:
@@ -844,18 +1394,19 @@ def main() -> int:
                         args.repeat = repeat
                         args.ext_offset = ext_offset
 
-                        configure_glitch(scope, args)
-
                         if args.debug_glitch_config and (
                             point_id <= 5
                             or args.glitch_debug_every <= 1
                             or point_id % args.glitch_debug_every == 0
                         ):
-                            # Do not leave hs2 in glitch mode here: keypair/upload still use prep mode.
+                            # Do not configure or route glitch here: keypair/upload still use prep mode.
                             state = get_glitch_state(scope)
                             print("[point pre-capture cfg]", glitch_state_short(state))
 
-                        if args.new_key_every_point:
+                        # The pre-helper keypair is used for point 1.  If the
+                        # user requested a new key every point, regenerate at
+                        # the start of subsequent points only.
+                        if args.new_key_every_point and point_id > 1:
                             need_key = True
 
                         if need_key:
@@ -879,8 +1430,8 @@ def main() -> int:
                         single_bit_target_mbit = 0
 
                         print(
-                            f"\n===== Point {point_id}: "
-                            f"w={width}, off={offset}, rep={repeat}, ext={ext_offset} ====="
+                            f"\npoint={point_id} "
+                            f"w={width}, off={offset}, rep={repeat}, ext={ext_offset}"
                         )
 
                         for point_trial in range(1, args.trials_per_point + 1):
@@ -922,13 +1473,14 @@ def main() -> int:
                             }
 
                             try:
-                                set_prep_mode(scope)
+                                soft_prep_no_clock(scope, target, delay=0.05)
 
                                 host = host_encapsulate(host_helper, pk)
                                 ct = host["ct"]
                                 m_host = host["m"]
                                 coins = host["coins"]
 
+                                soft_prep_no_clock(scope, target, delay=0.05)
                                 upload_ct(kt, ct)
 
                                 dec = glitched_m_decode(
@@ -1017,8 +1569,13 @@ def main() -> int:
                                     if args.stop_on_crash:
                                         raise RuntimeError("target crashed")
 
-                                    safe_recover(scope, target, args)
-                                    configure_glitch(scope, args)
+                                    hard_prep_mode(
+                                        scope,
+                                        target,
+                                        args,
+                                        reset=True,
+                                        delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
+                                    )
                                     need_key = True
 
                                     keypair_id += 1
@@ -1041,8 +1598,13 @@ def main() -> int:
                                 row["error"] = repr(e)
                                 row_writer.writerow(row)
 
-                                safe_recover(scope, target, args)
-                                configure_glitch(scope, args)
+                                hard_prep_mode(
+                                    scope,
+                                    target,
+                                    args,
+                                    reset=True,
+                                    delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
+                                )
 
                                 keypair_id += 1
                                 pk, pk_hash, secret = generate_keypair_and_secret(
@@ -1055,19 +1617,30 @@ def main() -> int:
                                 )
                                 need_key = False
 
-                            if (
-                                args.progress_interval
-                                and point_trial % args.progress_interval == 0
-                            ):
-                                print(
-                                    f"  progress {point_trial}/{args.trials_per_point}: "
-                                    f"wrong={counts['message_wrong']}, "
-                                    f"single208={single_bit_target}, "
-                                    f"single208_mbit{args.m_bit_filter}={single_bit_target_mbit}, "
-                                    f"neg={residual_negative}, "
-                                    f"pos0={residual_positive_or_zero}, "
-                                    f"crash={counts['crash']}"
-                                )
+                            if args.progress_interval:
+                                if (
+                                    point_trial == 1
+                                    or point_trial == args.trials_per_point
+                                    or point_trial % args.progress_interval == 0
+                                ):
+                                    print(
+                                        "\r" + progress_bar_line(
+                                            point_id=point_id,
+                                            point_trial=point_trial,
+                                            trials_per_point=args.trials_per_point,
+                                            counts=counts,
+                                            single_bit_target=single_bit_target,
+                                            single_bit_target_mbit=single_bit_target_mbit,
+                                            residual_negative=residual_negative,
+                                            residual_positive_or_zero=residual_positive_or_zero,
+                                            m_bit_filter=args.m_bit_filter,
+                                        ),
+                                        end="",
+                                        flush=True,
+                                    )
+
+                        if args.progress_interval:
+                            print()
 
                         denom = residual_negative + residual_positive_or_zero
                         neg_rate = residual_negative / denom if denom else 0.0
@@ -1100,7 +1673,15 @@ def main() -> int:
                         summary_writer.writerow(summary)
                         summary_rows.append(summary)
 
-                        print("  summary:", summary)
+                        print(
+                            f"summary point={point_id}: "
+                            f"wrong={summary['message_wrong']} "
+                            f"single208={summary['single_bit_target']} "
+                            f"single208_mbit{args.m_bit_filter}={summary['single_bit_target_mbit']} "
+                            f"neg_rate={summary['residual_negative_rate']:.3f} "
+                            f"crash_rate={summary['crash_rate']:.3f} "
+                            f"score={summary['score']:.2f}"
+                        )
 
         print("\n===== Top candidate points by score =====")
         top = sorted(summary_rows, key=lambda x: float(x["score"]), reverse=True)[:20]
@@ -1120,17 +1701,19 @@ def main() -> int:
 
     finally:
         try:
-            row_f.close()
+            if row_f is not None:
+                row_f.close()
         except Exception:
             pass
 
         try:
-            summary_f.close()
+            if summary_f is not None:
+                summary_f.close()
         except Exception:
             pass
 
         try:
-            if interm_proc.poll() is None:
+            if interm_proc is not None and interm_proc.poll() is None:
                 if interm_proc.stdin is not None:
                     interm_proc.stdin.close()
                 interm_proc.terminate()
