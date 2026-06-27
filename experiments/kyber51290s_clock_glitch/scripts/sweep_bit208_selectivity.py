@@ -2,6 +2,8 @@
 """
 Fast screening/formal sweep script for bit-208 fault-model selectivity.
 
+Version v4: raw SimpleSerial C-upload + no clock reprogramming inside trial M path.
+
 Goal:
     Find a glitch setting that still produces single-bit208 message faults,
     but where those faults correlate with the reconstructed decoder residual sign.
@@ -78,9 +80,11 @@ SECRET_DIM = 512
 
 M_LEN = 32
 PK_LEN = 800
+CT_LEN = 768
 INDCPA_SK_LEN = 768
 SK_CHUNK = 128
 PK_CHUNK = 200
+CT_CHUNK = 128
 
 MONT_INV = 169
 MU_ONE = 1665
@@ -358,22 +362,18 @@ def configure_capture_settings(scope: Any, args: argparse.Namespace) -> None:
 
 
 def direct_attack_mode(scope: Any, args: argparse.Namespace) -> None:
-    """Configure capture/attack mode directly.
+    """Configure capture/attack mode directly without disturbing clkgen.
 
-    Normal sweep mode routes HS2 through the glitch module.  With
-    --no-glitch-route, keep HS2 on the clean clkgen path while still arming
-    the scope.  This is useful for C/M/trigger sanity checks because it proves
-    the firmware and trigger path work without perturbing the target clock.
+    Important for this target: after K/R/Z/C have populated RAM state, repeatedly
+    assigning scope.clock.clkgen_freq or scope.clock.adc_src immediately before
+    M can momentarily disturb the target clock and make an otherwise valid M
+    decode disappear as valid=False,payload_len=0 with trigger_count=0.
+
+    Therefore this function only applies ADC capture settings, trigger source,
+    and the glitch routing/settings required for the current point. Clock setup
+    remains the one established during manual_connect/hard_prep.
     """
     configure_capture_settings(scope, args)
-    try:
-        scope.clock.clkgen_freq = args.clkgen_freq
-    except Exception:
-        pass
-    try:
-        scope.clock.adc_src = ADC_SRC
-    except Exception:
-        pass
 
     if getattr(args, "no_glitch_route", False):
         try:
@@ -769,6 +769,63 @@ def read_public_key_manual(target: Any, debug: bool = False) -> bytes:
     return pk
 
 
+def upload_ct_manual(target: Any, ct: bytes, *, timeout: float = 10.0, debug: bool = False) -> None:
+    """Upload ciphertext using the firmware C command directly.
+
+    Firmware protocol:
+        C payload = 2-byte little-endian offset || 128-byte ciphertext chunk
+        C response = 1-byte status, expected 0x00
+
+    Important: this function takes the raw ChipWhisperer SimpleSerial target,
+    not the KyberTarget wrapper. Passing KyberTarget causes
+    AttributeError("'KyberTarget' object has no attribute 'simpleserial_write'").
+    """
+    ct = to_bytes(ct)
+    if len(ct) != CT_LEN:
+        raise RuntimeError(f"bad ct length: got {len(ct)}, expected {CT_LEN}")
+
+    for offset in range(0, CT_LEN, CT_CHUNK):
+        chunk = ct[offset:offset + CT_CHUNK]
+        if len(chunk) != CT_CHUNK:
+            raise RuntimeError(
+                f"bad final C chunk at offset={offset}: got {len(chunk)}, expected {CT_CHUNK}"
+            )
+
+        payload = bytearray([offset & 0xFF, (offset >> 8) & 0xFF]) + bytearray(chunk)
+
+        flush_target(target)
+        time.sleep(0.01)
+        target.simpleserial_write("C", payload)
+
+        resp = target.simpleserial_read_witherrors(
+            "C",
+            1,
+            glitch_timeout=timeout,
+        )
+
+        if debug:
+            valid = ""
+            payload_len = ""
+            rv_hex = ""
+            full_hex = ""
+            if isinstance(resp, dict):
+                valid = resp.get("valid")
+                payload_len = len(to_bytes(resp.get("payload")))
+                rv_hex = to_bytes(resp.get("rv")).hex()
+                full_hex = to_bytes(resp.get("full_response")).hex()
+            print(
+                f"[DEBUG C upload] off={offset} len={len(chunk)} "
+                f"valid={valid} payload_len={payload_len} rv={rv_hex} full={full_hex}"
+            )
+
+        packet = validate_response(resp, "C", 1)
+        status = bytes(packet.payload)
+        if len(status) != 1 or status[0] != 0:
+            raise RuntimeError(
+                f"C upload failed at offset={offset}: status={status.hex()}"
+            )
+
+
 def read_public_key_with_retries(
     scope: Any,
     target: Any,
@@ -1088,6 +1145,16 @@ def glitched_m_decode(
             if state.get("actual_hs2") != expected_hs2:
                 raise RuntimeError(f"hs2 route mismatch: expected {expected_hs2}, state={state}")
 
+        # Keep the serial parser clean before the command that creates the
+        # capture trigger.  Standalone E->M tests flush immediately before M;
+        # doing the same here avoids stale bytes from prior C upload responses
+        # being interpreted as the M response.
+        try:
+            flush_target(target)
+        except Exception:
+            pass
+        time.sleep(0.01)
+
         scope.arm()
         target.simpleserial_write("M", bytearray([]))
 
@@ -1137,14 +1204,9 @@ def glitched_m_decode(
         return row
 
     finally:
-        # Return only the target clock route to normal. Avoid set_prep_mode()
-        # here because manual high-clock communication works without it, and
-        # set_prep_mode() can introduce side effects between attack/prep phases.
-        try:
-            scope.clock.clkgen_freq = args.clkgen_freq
-            scope.clock.adc_src = ADC_SRC
-        except Exception:
-            pass
+        # Return only the target clock route to normal.  Do not reassign
+        # clkgen_freq/adc_src here; clock reprogramming after every M can disturb
+        # target RAM state or UART timing before the next upload/decode.
         force_prep_route(scope)
 
 
@@ -1363,36 +1425,6 @@ def build_argparser() -> argparse.ArgumentParser:
     return p
 
 
-CT_LEN = 768
-CT_CHUNK = 128
-
-def upload_ct_manual(target: Any, ct: bytes) -> None:
-    if len(ct) != CT_LEN:
-        raise RuntimeError(f"bad ct length: {len(ct)}")
-
-    for off in range(0, CT_LEN, CT_CHUNK):
-        chunk = ct[off:off + CT_CHUNK]
-        payload = bytes([off & 0xff, (off >> 8) & 0xff]) + chunk
-
-        flush_target(target)
-        time.sleep(0.01)
-        target.simpleserial_write("C", bytearray(payload))
-
-        resp = target.simpleserial_read_witherrors(
-            "C",
-            1,
-            glitch_timeout=10.0,
-        )
-
-        packet = validate_response(resp, "C", 1)
-        data = bytes(packet.payload)
-
-        if len(data) != 1 or data[0] != 0:
-            raise RuntimeError(
-                f"C upload failed at off={off}: status={data.hex()}"
-            )
-
-
 def main() -> int:
     args = build_argparser().parse_args()
 
@@ -1422,7 +1454,7 @@ def main() -> int:
     metadata = vars(args).copy()
     metadata.update({
         "created_at": datetime.now().isoformat(),
-        "script": "sweep_bit208_selectivity_fastscreen_pointprogress.py",
+        "script": "sweep_bit208_selectivity_fastscreen_pointprogress_v4_no_clock_touch.py",
         "widths": widths,
         "offsets": offsets,
         "repeats": repeats,
@@ -1431,6 +1463,8 @@ def main() -> int:
         "max_trials_without_early_abort": total_points * args.trials_per_point,
         "score": "single_bit_mbit_count * max(0, residual_negative_rate - 0.5)",
         "keygen_order": "manual_connect -> K/R/Z -> build_host_helper -> start_intermediate_helper -> sweep",
+        "ciphertext_upload": "manual raw SimpleSerial C command; uses raw target, not KyberTarget wrapper",
+        "trial_clock_policy": "do not reassign clkgen_freq/adc_src inside M trial path",
         "speed_features": {
             "adc_timeout_default": 0.2,
             "fast_rekey_on_crash": args.fast_rekey_on_crash,
@@ -1515,6 +1549,7 @@ def main() -> int:
         "residual_positive_or_zero",
         "residual_negative_rate",
         "crash_rate",
+        "host_exception_rate",
         "message_wrong_rate",
         "single_bit_target_rate",
         "score",
@@ -1682,7 +1717,7 @@ def main() -> int:
                                 coins = host["coins"]
 
                                 soft_prep_no_clock(scope, target, delay=0.05)
-                                upload_ct_manual(kt, ct)
+                                upload_ct_manual(target, ct, debug=args.debug)
 
                                 dec = glitched_m_decode(
                                     scope=scope,
@@ -1952,6 +1987,7 @@ def main() -> int:
                             "residual_positive_or_zero": residual_positive_or_zero,
                             "residual_negative_rate": neg_rate,
                             "crash_rate": counts["crash"] / max(1, trials_done),
+                            "host_exception_rate": counts["host_exception"] / max(1, trials_done),
                             "message_wrong_rate": counts["message_wrong"] / max(1, trials_done),
                             "single_bit_target_rate": single_bit_target / max(1, trials_done),
                             "score": score,
@@ -1970,11 +2006,15 @@ def main() -> int:
                             f"single208_mbit{args.m_bit_filter}={summary['single_bit_target_mbit']} "
                             f"neg_rate={summary['residual_negative_rate']:.3f} "
                             f"crash_rate={summary['crash_rate']:.3f} "
+                            f"host_exc_rate={summary['host_exception_rate']:.3f} "
                             f"score={summary['score']:.2f}"
                         )
 
         print("\n===== Top candidate points by score =====")
-        top = sorted(summary_rows, key=lambda x: float(x["score"]), reverse=True)[:20]
+        top_candidates = [r for r in summary_rows if float(r.get("host_exception_rate", 0.0)) < 1.0]
+        top = sorted(top_candidates, key=lambda x: float(x["score"]), reverse=True)[:20]
+        if not top:
+            print("No non-host-exception points. Check selectivity_rows.csv error column.")
         for r in top:
             print(
                 f"point={r['point_id']} "
@@ -1982,6 +2022,7 @@ def main() -> int:
                 f"single_mbit={r['single_bit_target_mbit']} "
                 f"neg_rate={r['residual_negative_rate']:.3f} "
                 f"crash_rate={r['crash_rate']:.3f} "
+                f"host_exc_rate={r.get('host_exception_rate', 0.0):.3f} "
                 f"score={r['score']:.2f}"
             )
 
