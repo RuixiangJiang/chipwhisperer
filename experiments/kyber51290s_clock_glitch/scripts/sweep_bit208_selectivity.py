@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Formal sweep script for bit-208 fault-model selectivity.
+Fast screening/formal sweep script for bit-208 fault-model selectivity.
 
 Goal:
     Find a glitch setting that still produces single-bit208 message faults,
@@ -14,6 +14,11 @@ So we score each parameter by:
     single_bit208_mbit1_count
     residual_negative_rate among those samples
     score = count * max(0, residual_negative_rate - 0.5)
+
+This version also supports fast screening of crash-heavy regions:
+    --adc-timeout defaults to 0.2 s
+    --fast-rekey-on-crash avoids full R/Z/decode after every crash
+    --early-abort-crashy-points skips obviously crash-only points
 
 This script requires debug firmware commands:
     M: return decoded message m_dec
@@ -90,8 +95,13 @@ def log_debug(args: argparse.Namespace, *items: Any) -> None:
 def progress_bar_line(
     *,
     point_id: int,
+    total_points: int,
     point_trial: int,
     trials_per_point: int,
+    width: float,
+    offset: float,
+    repeat: int,
+    ext_offset: int,
     counts: Counter[str],
     single_bit_target: int,
     single_bit_target_mbit: int,
@@ -99,12 +109,25 @@ def progress_bar_line(
     residual_positive_or_zero: int,
     m_bit_filter: int,
 ) -> str:
-    """Return a compact one-line progress bar for the current point."""
-    bar_len = 24
-    done = int(round(bar_len * point_trial / max(1, trials_per_point)))
+    """Return a compact one-line progress bar for the whole sweep.
+
+    The main progress indicator is current point / total points, not merely
+    current trial / trials within a single point.  The bar advances smoothly
+    within a point using point_trial/trials_per_point, while the label still
+    shows the current point index.
+    """
+    bar_len = 28
+    total_points = max(1, total_points)
+    trials_per_point = max(1, trials_per_point)
+    overall_done = (max(0, point_id - 1) + min(point_trial, trials_per_point) / trials_per_point) / total_points
+    overall_done = max(0.0, min(1.0, overall_done))
+    done = int(round(bar_len * overall_done))
     bar = "#" * done + "-" * (bar_len - done)
+    pct = 100.0 * overall_done
     return (
-        f"point={point_id} {point_trial}/{trials_per_point} [{bar}] "
+        f"point={point_id}/{total_points} [{bar}] {pct:5.1f}% "
+        f"trial={point_trial}/{trials_per_point} "
+        f"w={width} off={offset} rep={repeat} ext={ext_offset} "
         f"wrong={counts['message_wrong']} "
         f"single208={single_bit_target} "
         f"single208_mbit{m_bit_filter}={single_bit_target_mbit} "
@@ -122,13 +145,30 @@ def sha256_hex(x: bytes) -> str:
 
 
 def to_bytes(x: Any) -> bytes:
+    """Best-effort conversion for ChipWhisperer response fields.
+
+    Some CW versions return full_response/rv as str instead of bytes-like
+    objects. Calling bytes(str_obj) without an encoding raises
+    TypeError("string argument without an encoding"), which was previously
+    misclassified as a target crash. Use latin-1 for one-to-one byte mapping
+    when possible.
+    """
     if x is None:
         return b""
     if isinstance(x, bytes):
         return x
     if isinstance(x, bytearray):
         return bytes(x)
-    return bytes(x)
+    if isinstance(x, str):
+        return x.encode("latin-1", errors="replace")
+    if isinstance(x, int):
+        if 0 <= x <= 255:
+            return bytes([x])
+        return str(x).encode("ascii", errors="replace")
+    try:
+        return bytes(x)
+    except Exception:
+        return str(x).encode("utf-8", errors="replace")
 
 
 def center_mod_q_scalar(x: int) -> int:
@@ -185,11 +225,18 @@ def force_glitch_route(scope: Any, args: argparse.Namespace) -> dict[str, Any]:
     """
     Make the currently selected parameter point active on the target clock.
 
-    This is intentionally redundant with collect_host_faults.configure_glitch()
-    and set_attack_mode(): after crashes/recovery, scripts may leave hs2 at
-    "clkgen". For every glitched M decode, force hs2 back to glitch and rewrite
-    the current width/offset/repeat/ext_offset.
+    In normal mode this forces HS2 through the glitch module and rewrites the
+    current point's width/offset/repeat/ext_offset.  With --no-glitch-route it
+    deliberately keeps HS2 on clean clkgen for baseline M/trigger sanity checks.
     """
+    if getattr(args, "no_glitch_route", False):
+        try:
+            scope.io.hs2 = HS2_NORMAL
+        except Exception:
+            pass
+        time.sleep(0.005)
+        return get_glitch_state(scope)
+
     # Re-apply glitch module settings for the current point.
     try:
         scope.glitch.output = args.glitch_output
@@ -288,7 +335,7 @@ def manual_connect_scope_and_target(args: argparse.Namespace) -> tuple[Any, Any]
 
 
 def configure_capture_settings(scope: Any, args: argparse.Namespace) -> None:
-    """Apply ADC/gain settings only when we are about to capture/glitch."""
+    """Apply ADC/gain/trigger settings only when we are about to capture/glitch."""
     try:
         scope.gain.mode = "high"
         scope.gain.gain = 30
@@ -300,10 +347,24 @@ def configure_capture_settings(scope: Any, args: argparse.Namespace) -> None:
         scope.adc.basic_mode = "rising_edge"
     except Exception:
         pass
+    try:
+        # CW308_STM32F3 trigger_high()/trigger_low() is routed to TIO4 in
+        # the standard ChipWhisperer simpleserial setup.  Explicitly set this
+        # here so capture timeout behaviour is not caused by a stale trigger
+        # source from previous experiments.
+        scope.trigger.triggers = "tio4"
+    except Exception:
+        pass
 
 
 def direct_attack_mode(scope: Any, args: argparse.Namespace) -> None:
-    """Configure the glitch path directly, without collect_host_faults.set_attack_mode()."""
+    """Configure capture/attack mode directly.
+
+    Normal sweep mode routes HS2 through the glitch module.  With
+    --no-glitch-route, keep HS2 on the clean clkgen path while still arming
+    the scope.  This is useful for C/M/trigger sanity checks because it proves
+    the firmware and trigger path work without perturbing the target clock.
+    """
     configure_capture_settings(scope, args)
     try:
         scope.clock.clkgen_freq = args.clkgen_freq
@@ -313,6 +374,15 @@ def direct_attack_mode(scope: Any, args: argparse.Namespace) -> None:
         scope.clock.adc_src = ADC_SRC
     except Exception:
         pass
+
+    if getattr(args, "no_glitch_route", False):
+        try:
+            scope.io.hs2 = HS2_NORMAL
+        except Exception:
+            pass
+        time.sleep(0.005)
+        return
+
     try:
         scope.glitch.output = args.glitch_output
     except Exception:
@@ -923,6 +993,37 @@ def generate_keypair_and_secret(
         f"generate_keypair_and_secret failed after standalone-style retries: {transaction_last_err!r}"
     )
 
+
+def fast_rekey_after_crash(
+    scope: Any,
+    target: Any,
+    args: argparse.Namespace,
+    *,
+    label: str = "crash",
+) -> None:
+    """
+    Fast crash recovery path for deterministic debug firmware.
+
+    A full generate_keypair_and_secret() performs K, reads pk via R, dumps sk via
+    Z, and decodes the secret.  In the current firmware, K after reset produces
+    the same pk/sk every time, so crash-heavy screening can reset + run only K
+    and reuse the existing pk/secret in host memory.
+    """
+    reset_delay = max(float(getattr(args, "reset_delay", 0.2)), 0.8)
+    hard_prep_mode(scope, target, args, reset=True, delay=reset_delay)
+
+    # Match standalone-style K timing.
+    time.sleep(0.2)
+    ret = raw_keypair_command(target, timeout=60.0)
+    if ret != 0:
+        raise RuntimeError(f"fast rekey K returned ret={ret}")
+
+    time.sleep(0.2)
+    p = ping_once(target, timeout=2.0)
+    if not (isinstance(p, dict) and p.get("valid", False)):
+        raise RuntimeError(f"target not alive after fast rekey ({label}): {p!r}")
+
+
 def read_m_response(target: Any, timeout: float) -> dict[str, Any]:
     resp = target.simpleserial_read_witherrors(
         "M",
@@ -982,8 +1083,10 @@ def glitched_m_decode(
         state = force_glitch_route(scope, args)
         row.update(state)
 
-        if args.strict_glitch_route and state.get("actual_hs2") != HS2_GLITCH:
-            raise RuntimeError(f"hs2 is not routed to glitch: {state}")
+        if args.strict_glitch_route:
+            expected_hs2 = HS2_NORMAL if getattr(args, "no_glitch_route", False) else HS2_GLITCH
+            if state.get("actual_hs2") != expected_hs2:
+                raise RuntimeError(f"hs2 route mismatch: expected {expected_hs2}, state={state}")
 
         scope.arm()
         target.simpleserial_write("M", bytearray([]))
@@ -1166,9 +1269,18 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--ss-version", default="SS_VER_2_1")
     p.add_argument("--clkgen-freq", type=float, default=CLKGEN_FREQ)
     p.add_argument("--adc-samples", type=int, default=5000)
-    p.add_argument("--adc-timeout", type=float, default=2.0)
+    p.add_argument("--adc-timeout", type=float, default=0.2)
     p.add_argument("--decode-timeout", type=float, default=10.0)
     p.add_argument("--glitch-output", default="clock_xor")
+    p.add_argument(
+        "--no-glitch-route",
+        action="store_true",
+        help=(
+            "Baseline mode: keep HS2 on clean clkgen during M decode while still "
+            "arming the scope and reading the M response. Use this for C/M/trigger "
+            "sanity checks. Normal glitch sweeps should not use this option."
+        ),
+    )
     p.add_argument(
         "--debug-glitch-config",
         action="store_true",
@@ -1187,7 +1299,7 @@ def build_argparser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--out-dir", default="")
-    p.add_argument("--progress-interval", type=int, default=1, help="Refresh the one-line point progress every N trials; use 0 to disable.")
+    p.add_argument("--progress-interval", type=int, default=1, help="Refresh the one-line whole-sweep progress every N trials; use 0 to disable.")
     p.add_argument("--reset-delay", type=float, default=0.8)
 
     p.add_argument(
@@ -1203,12 +1315,82 @@ def build_argparser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--fast-rekey-on-crash",
+        action="store_true",
+        help=(
+            "After a crash, reset the target and issue only K to restore the deterministic "
+            "target keypair, reusing the previously dumped pk/secret. This avoids slow "
+            "R/Z/decode on every crash-heavy trial. Use only when K is deterministic "
+            "and pk_hash stays constant after reset, as in the current debug firmware."
+        ),
+    )
+    p.add_argument(
+        "--full-rekey-every",
+        type=int,
+        default=0,
+        help=(
+            "When --fast-rekey-on-crash is enabled, perform a full K/R/Z/decode every N "
+            "crash recoveries as a consistency check. 0 disables periodic full checks."
+        ),
+    )
+    p.add_argument(
+        "--early-abort-crashy-points",
+        action="store_true",
+        help=(
+            "During screening, stop the current point early if it is clearly crash-only "
+            "after --early-abort-min-trials trials."
+        ),
+    )
+    p.add_argument(
+        "--early-abort-min-trials",
+        type=int,
+        default=10,
+        help="Minimum trials before a crash-heavy point can be skipped early.",
+    )
+    p.add_argument(
+        "--early-abort-crash-rate",
+        type=float,
+        default=0.95,
+        help="Crash-rate threshold for --early-abort-crashy-points.",
+    )
+
+    p.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose bring-up, K/R/Z, and retry debug logs.",
     )
 
     return p
+
+
+CT_LEN = 768
+CT_CHUNK = 128
+
+def upload_ct_manual(target: Any, ct: bytes) -> None:
+    if len(ct) != CT_LEN:
+        raise RuntimeError(f"bad ct length: {len(ct)}")
+
+    for off in range(0, CT_LEN, CT_CHUNK):
+        chunk = ct[off:off + CT_CHUNK]
+        payload = bytes([off & 0xff, (off >> 8) & 0xff]) + chunk
+
+        flush_target(target)
+        time.sleep(0.01)
+        target.simpleserial_write("C", bytearray(payload))
+
+        resp = target.simpleserial_read_witherrors(
+            "C",
+            1,
+            glitch_timeout=10.0,
+        )
+
+        packet = validate_response(resp, "C", 1)
+        data = bytes(packet.payload)
+
+        if len(data) != 1 or data[0] != 0:
+            raise RuntimeError(
+                f"C upload failed at off={off}: status={data.hex()}"
+            )
 
 
 def main() -> int:
@@ -1222,6 +1404,8 @@ def main() -> int:
         args.ext_offset_stop,
         args.ext_offset_step,
     )
+
+    total_points = len(widths) * len(offsets) * len(repeats) * len(ext_offsets)
 
     args.width = widths[0]
     args.offset = offsets[0]
@@ -1238,13 +1422,23 @@ def main() -> int:
     metadata = vars(args).copy()
     metadata.update({
         "created_at": datetime.now().isoformat(),
-        "script": "sweep_bit208_selectivity_formal.py",
+        "script": "sweep_bit208_selectivity_fastscreen_pointprogress.py",
         "widths": widths,
         "offsets": offsets,
         "repeats": repeats,
         "ext_offsets": ext_offsets,
+        "total_points": total_points,
+        "max_trials_without_early_abort": total_points * args.trials_per_point,
         "score": "single_bit_mbit_count * max(0, residual_negative_rate - 0.5)",
         "keygen_order": "manual_connect -> K/R/Z -> build_host_helper -> start_intermediate_helper -> sweep",
+        "speed_features": {
+            "adc_timeout_default": 0.2,
+            "fast_rekey_on_crash": args.fast_rekey_on_crash,
+            "full_rekey_every": args.full_rekey_every,
+            "early_abort_crashy_points": args.early_abort_crashy_points,
+            "early_abort_min_trials": args.early_abort_min_trials,
+            "early_abort_crash_rate": args.early_abort_crash_rate,
+        },
         "clock_config": {
             "CLKGEN_FREQ": CLKGEN_FREQ,
             "ADC_SRC": ADC_SRC,
@@ -1260,6 +1454,8 @@ def main() -> int:
     )
 
     print("[+] Output dir:", out_dir)
+    print(f"[+] Sweep points: {total_points} ({len(widths)} widths × {len(offsets)} offsets × {len(repeats)} repeats × {len(ext_offsets)} ext_offsets)")
+    print(f"[+] Max trials without early abort: {total_points * args.trials_per_point}")
     log_debug(args, "[+] Keygen order: manual connect -> K/R/Z BEFORE host/intermediate helper build")
 
     row_csv = out_dir / "selectivity_rows.csv"
@@ -1322,6 +1518,7 @@ def main() -> int:
         "message_wrong_rate",
         "single_bit_target_rate",
         "score",
+        "aborted_early",
     ]
 
     row_f = None
@@ -1337,6 +1534,7 @@ def main() -> int:
     need_key = True
     global_trial = 0
     point_id = 0
+    fast_rekey_count = 0
 
     summary_rows: list[dict[str, Any]] = []
 
@@ -1428,6 +1626,8 @@ def main() -> int:
                         residual_positive_or_zero = 0
                         single_bit_target = 0
                         single_bit_target_mbit = 0
+                        trials_done = 0
+                        point_aborted = False
 
                         print(
                             f"\npoint={point_id} "
@@ -1436,6 +1636,7 @@ def main() -> int:
 
                         for point_trial in range(1, args.trials_per_point + 1):
                             global_trial += 1
+                            trials_done = point_trial
 
                             row: dict[str, Any] = {
                                 "global_trial": global_trial,
@@ -1481,7 +1682,7 @@ def main() -> int:
                                 coins = host["coins"]
 
                                 soft_prep_no_clock(scope, target, delay=0.05)
-                                upload_ct(kt, ct)
+                                upload_ct_manual(kt, ct)
 
                                 dec = glitched_m_decode(
                                     scope=scope,
@@ -1569,6 +1770,85 @@ def main() -> int:
                                     if args.stop_on_crash:
                                         raise RuntimeError("target crashed")
 
+                                    use_full_rekey = True
+                                    if (
+                                        args.fast_rekey_on_crash
+                                        and not args.new_key_every_point
+                                        and pk
+                                        and secret is not None
+                                    ):
+                                        fast_rekey_count += 1
+                                        if args.full_rekey_every <= 0 or (fast_rekey_count % args.full_rekey_every) != 0:
+                                            use_full_rekey = False
+
+                                    if use_full_rekey:
+                                        hard_prep_mode(
+                                            scope,
+                                            target,
+                                            args,
+                                            reset=True,
+                                            delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
+                                        )
+                                        keypair_id += 1
+                                        pk, pk_hash, secret = generate_keypair_and_secret(
+                                            scope=scope,
+                                            target=target,
+                                            kt=kt,
+                                            out_dir=out_dir,
+                                            keypair_id=keypair_id,
+                                            args=args,
+                                        )
+                                        need_key = False
+                                    else:
+                                        try:
+                                            fast_rekey_after_crash(scope, target, args, label=f"point={point_id},trial={point_trial}")
+                                            log_debug(args, f"[DEBUG fast rekey ok] point={point_id} trial={point_trial}")
+                                            need_key = False
+                                        except Exception as e:
+                                            log_debug(args, "[WARN] fast rekey failed; falling back to full keygen:", repr(e))
+                                            keypair_id += 1
+                                            pk, pk_hash, secret = generate_keypair_and_secret(
+                                                scope=scope,
+                                                target=target,
+                                                kt=kt,
+                                                out_dir=out_dir,
+                                                keypair_id=keypair_id,
+                                                args=args,
+                                            )
+                                            need_key = False
+
+                            except KeyboardInterrupt:
+                                raise
+
+                            except Exception as e:
+                                counts["host_exception"] += 1
+                                row["classification"] = "host_exception"
+                                row["error"] = repr(e)
+                                row_writer.writerow(row)
+
+                                if (
+                                    args.fast_rekey_on_crash
+                                    and not args.new_key_every_point
+                                    and pk
+                                    and secret is not None
+                                ):
+                                    try:
+                                        fast_rekey_count += 1
+                                        fast_rekey_after_crash(scope, target, args, label=f"host_exception point={point_id},trial={point_trial}")
+                                        need_key = False
+                                    except Exception as rekey_err:
+                                        log_debug(args, "[WARN] fast rekey after host_exception failed; falling back to full keygen:", repr(rekey_err))
+                                        keypair_id += 1
+                                        pk, pk_hash, secret = generate_keypair_and_secret(
+                                            scope=scope,
+                                            target=target,
+                                            kt=kt,
+                                            out_dir=out_dir,
+                                            keypair_id=keypair_id,
+                                            args=args,
+                                        )
+                                        need_key = False
+                                else:
                                     hard_prep_mode(
                                         scope,
                                         target,
@@ -1576,7 +1856,6 @@ def main() -> int:
                                         reset=True,
                                         delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
                                     )
-                                    need_key = True
 
                                     keypair_id += 1
                                     pk, pk_hash, secret = generate_keypair_and_secret(
@@ -1589,34 +1868,6 @@ def main() -> int:
                                     )
                                     need_key = False
 
-                            except KeyboardInterrupt:
-                                raise
-
-                            except Exception as e:
-                                counts["host_exception"] += 1
-                                row["classification"] = "host_exception"
-                                row["error"] = repr(e)
-                                row_writer.writerow(row)
-
-                                hard_prep_mode(
-                                    scope,
-                                    target,
-                                    args,
-                                    reset=True,
-                                    delay=max(float(getattr(args, "reset_delay", 0.2)), 0.8),
-                                )
-
-                                keypair_id += 1
-                                pk, pk_hash, secret = generate_keypair_and_secret(
-                                    scope=scope,
-                                    target=target,
-                                    kt=kt,
-                                    out_dir=out_dir,
-                                    keypair_id=keypair_id,
-                                    args=args,
-                                )
-                                need_key = False
-
                             if args.progress_interval:
                                 if (
                                     point_trial == 1
@@ -1626,8 +1877,13 @@ def main() -> int:
                                     print(
                                         "\r" + progress_bar_line(
                                             point_id=point_id,
+                                            total_points=total_points,
                                             point_trial=point_trial,
                                             trials_per_point=args.trials_per_point,
+                                            width=width,
+                                            offset=offset,
+                                            repeat=repeat,
+                                            ext_offset=ext_offset,
                                             counts=counts,
                                             single_bit_target=single_bit_target,
                                             single_bit_target_mbit=single_bit_target_mbit,
@@ -1638,6 +1894,37 @@ def main() -> int:
                                         end="",
                                         flush=True,
                                     )
+
+                            if (
+                                args.early_abort_crashy_points
+                                and point_trial >= max(1, args.early_abort_min_trials)
+                                and counts["message_wrong"] == 0
+                                and single_bit_target == 0
+                                and (counts["crash"] / max(1, point_trial)) >= args.early_abort_crash_rate
+                            ):
+                                point_aborted = True
+                                if args.progress_interval:
+                                    print(
+                                        "\r" + progress_bar_line(
+                                            point_id=point_id,
+                                            total_points=total_points,
+                                            point_trial=point_trial,
+                                            trials_per_point=args.trials_per_point,
+                                            width=width,
+                                            offset=offset,
+                                            repeat=repeat,
+                                            ext_offset=ext_offset,
+                                            counts=counts,
+                                            single_bit_target=single_bit_target,
+                                            single_bit_target_mbit=single_bit_target_mbit,
+                                            residual_negative=residual_negative,
+                                            residual_positive_or_zero=residual_positive_or_zero,
+                                            m_bit_filter=args.m_bit_filter,
+                                        ) + "  [early-abort crashy point]",
+                                        end="",
+                                        flush=True,
+                                    )
+                                break
 
                         if args.progress_interval:
                             print()
@@ -1652,7 +1939,7 @@ def main() -> int:
                             "offset": offset,
                             "repeat": repeat,
                             "ext_offset": ext_offset,
-                            "trials": args.trials_per_point,
+                            "trials": trials_done,
                             "message_correct": counts["message_correct"],
                             "message_wrong": counts["message_wrong"],
                             "crash": counts["crash"],
@@ -1664,10 +1951,11 @@ def main() -> int:
                             "residual_negative": residual_negative,
                             "residual_positive_or_zero": residual_positive_or_zero,
                             "residual_negative_rate": neg_rate,
-                            "crash_rate": counts["crash"] / args.trials_per_point,
-                            "message_wrong_rate": counts["message_wrong"] / args.trials_per_point,
-                            "single_bit_target_rate": single_bit_target / args.trials_per_point,
+                            "crash_rate": counts["crash"] / max(1, trials_done),
+                            "message_wrong_rate": counts["message_wrong"] / max(1, trials_done),
+                            "single_bit_target_rate": single_bit_target / max(1, trials_done),
                             "score": score,
+                            "aborted_early": int(point_aborted),
                         }
 
                         summary_writer.writerow(summary)
@@ -1675,6 +1963,8 @@ def main() -> int:
 
                         print(
                             f"summary point={point_id}: "
+                            f"trials={summary['trials']} "
+                            f"aborted={summary['aborted_early']} "
                             f"wrong={summary['message_wrong']} "
                             f"single208={summary['single_bit_target']} "
                             f"single208_mbit{args.m_bit_filter}={summary['single_bit_target_mbit']} "
