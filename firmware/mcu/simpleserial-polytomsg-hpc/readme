@@ -1,0 +1,5 @@
+make PLATFORM=CWLITEARM SS_VER=SS_VER_2_1 -j
+arm-none-eabi-objdump -d simpleserial-polytomsg-hpc-CWLITEARM.elf \
+  | sed -n '/<poly_tomsg>:/,/bx[[:space:]]*lr/p' | head -80
+python3 run_polytomsg_glitch.py --tolerant-reference --ref-runs 50   --no-crash-runs 100 --ext-start 0 --ext-stop 14200   --seeds 0x1,0x2 --output-csv polytomsg_glitch.csv 2>&1 | tee polytomsg_glitch.log
+python3 run_polytomsg_glitch.py --no-crash-runs 100 2>&1 | tee polytomsg_glitch.log

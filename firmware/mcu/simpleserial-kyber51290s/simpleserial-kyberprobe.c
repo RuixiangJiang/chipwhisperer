@@ -438,6 +438,22 @@ static uint8_t cmd_read_indcpa_sk_chunk(uint8_t *buf, uint8_t len)
     return 0x00;
 }
 
+extern uint32_t load_half_with_trigger(volatile uint32_t *p);
+extern volatile uint32_t *volatile poly_tomsg_half_ptr_mem;
+
+static uint8_t cmd_half_load_probe(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *buf)
+{
+    uint32_t h = load_half_with_trigger(poly_tomsg_half_ptr_mem);
+
+    buf[0] = (uint8_t)(h & 0xff);
+    buf[1] = (uint8_t)((h >> 8) & 0xff);
+    buf[2] = (uint8_t)((h >> 16) & 0xff);
+    buf[3] = (uint8_t)((h >> 24) & 0xff);
+
+    simpleserial_put('H', 4, buf);
+    return 0x00;
+}
+
 
 void HardFault_Handler(void)
 {
@@ -520,6 +536,7 @@ int main(void)
     simpleserial_addcmd('C', 2 + CT_CHUNK, cmd_load_ct);
     simpleserial_addcmd('M', 0, cmd_debug_decode_msg);
     simpleserial_addcmd('Z', 3, cmd_read_indcpa_sk_chunk);
+    simpleserial_addcmd('H', 0, cmd_half_load_probe);
     uart_puts("rKYBERPROBE_C\n");
 
     while (1) {

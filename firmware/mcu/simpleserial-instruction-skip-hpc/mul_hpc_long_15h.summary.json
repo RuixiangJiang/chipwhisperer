@@ -1,0 +1,500 @@
+{
+  "attempts": 1375956,
+  "base_project_version": "3.1.1",
+  "baseline_cycles": {
+    "max": 37,
+    "median": 37.0,
+    "min": 37,
+    "mode": [
+      37
+    ],
+    "n": 2400,
+    "pstdev": 0.0,
+    "unique": [
+      37
+    ]
+  },
+  "counters": {
+    "host_exception": 0,
+    "invalid_or_reset": 118750,
+    "metadata_corrupt": 1769,
+    "normal": 1159947,
+    "other_fault": 41171,
+    "stale_or_corrupt": 1755,
+    "target_skip_candidate": 52564
+  },
+  "elapsed_s": 54000.00150132924,
+  "instruction": "mul",
+  "long_run_version": "1.0.0",
+  "output_csv": "/home/ruixiang/chipwhisperer/firmware/mcu/simpleserial-instruction-skip-hpc/mul_hpc_long_15h.csv",
+  "parameter_results": [
+    {
+      "attempts": 148800,
+      "ext_offset": 0,
+      "offset": -30.5,
+      "repeat": 1,
+      "success_rate": 0.04666666666666667,
+      "successes": 6944,
+      "width": 0.25
+    },
+    {
+      "attempts": 148404,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.04866445648365273,
+      "successes": 7222,
+      "width": 0.525
+    },
+    {
+      "attempts": 148186,
+      "ext_offset": 0,
+      "offset": -32.5,
+      "repeat": 1,
+      "success_rate": 0.04795324794515001,
+      "successes": 7106,
+      "width": 0.275
+    },
+    {
+      "attempts": 147961,
+      "ext_offset": 0,
+      "offset": -44.0,
+      "repeat": 1,
+      "success_rate": 0.04824920080291428,
+      "successes": 7139,
+      "width": 0.325
+    },
+    {
+      "attempts": 147936,
+      "ext_offset": 0,
+      "offset": -36.5,
+      "repeat": 1,
+      "success_rate": 0.046513357127406445,
+      "successes": 6881,
+      "width": 0.2
+    },
+    {
+      "attempts": 74568,
+      "ext_offset": 0,
+      "offset": -41.5,
+      "repeat": 1,
+      "success_rate": 0.04890837892929943,
+      "successes": 3647,
+      "width": 0.475
+    },
+    {
+      "attempts": 74519,
+      "ext_offset": 0,
+      "offset": -43.0,
+      "repeat": 1,
+      "success_rate": 0.0474107274654786,
+      "successes": 3533,
+      "width": 0.3
+    },
+    {
+      "attempts": 74055,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.04846397947471474,
+      "successes": 3589,
+      "width": 0.325
+    },
+    {
+      "attempts": 909,
+      "ext_offset": 0,
+      "offset": -43.75,
+      "repeat": 1,
+      "success_rate": 0.034103410341034104,
+      "successes": 31,
+      "width": 0.325
+    },
+    {
+      "attempts": 898,
+      "ext_offset": 0,
+      "offset": -44.0,
+      "repeat": 1,
+      "success_rate": 0.051224944320712694,
+      "successes": 46,
+      "width": 0.3
+    },
+    {
+      "attempts": 893,
+      "ext_offset": 0,
+      "offset": -43.0,
+      "repeat": 1,
+      "success_rate": 0.05039193729003359,
+      "successes": 45,
+      "width": 0.325
+    },
+    {
+      "attempts": 883,
+      "ext_offset": 0,
+      "offset": -43.25,
+      "repeat": 1,
+      "success_rate": 0.052095130237825596,
+      "successes": 46,
+      "width": 0.3
+    },
+    {
+      "attempts": 875,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.05942857142857143,
+      "successes": 52,
+      "width": 0.5
+    },
+    {
+      "attempts": 873,
+      "ext_offset": 1,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.0,
+      "successes": 0,
+      "width": 0.525
+    },
+    {
+      "attempts": 861,
+      "ext_offset": 0,
+      "offset": -44.0,
+      "repeat": 1,
+      "success_rate": 0.04529616724738676,
+      "successes": 39,
+      "width": 0.35
+    },
+    {
+      "attempts": 857,
+      "ext_offset": 0,
+      "offset": -43.5,
+      "repeat": 1,
+      "success_rate": 0.06534422403733955,
+      "successes": 56,
+      "width": 0.325
+    },
+    {
+      "attempts": 851,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.04935370152761457,
+      "successes": 42,
+      "width": 0.55
+    },
+    {
+      "attempts": 851,
+      "ext_offset": 0,
+      "offset": -42.25,
+      "repeat": 1,
+      "success_rate": 0.0399529964747356,
+      "successes": 34,
+      "width": 0.525
+    },
+    {
+      "attempts": 847,
+      "ext_offset": 1,
+      "offset": -44.0,
+      "repeat": 1,
+      "success_rate": 0.0,
+      "successes": 0,
+      "width": 0.325
+    },
+    {
+      "attempts": 797,
+      "ext_offset": 0,
+      "offset": -43.25,
+      "repeat": 1,
+      "success_rate": 0.05144291091593475,
+      "successes": 41,
+      "width": 0.325
+    },
+    {
+      "attempts": 776,
+      "ext_offset": 0,
+      "offset": -30.5,
+      "repeat": 1,
+      "success_rate": 0.03994845360824742,
+      "successes": 31,
+      "width": 0.225
+    },
+    {
+      "attempts": 776,
+      "ext_offset": 0,
+      "offset": -30.5,
+      "repeat": 1,
+      "success_rate": 0.04381443298969072,
+      "successes": 34,
+      "width": 0.275
+    },
+    {
+      "attempts": 768,
+      "ext_offset": 0,
+      "offset": -43.5,
+      "repeat": 1,
+      "success_rate": 0.05078125,
+      "successes": 39,
+      "width": 0.3
+    },
+    {
+      "attempts": 766,
+      "ext_offset": 0,
+      "offset": -42.75,
+      "repeat": 1,
+      "success_rate": 0.04177545691906005,
+      "successes": 32,
+      "width": 0.525
+    },
+    {
+      "attempts": 764,
+      "ext_offset": 0,
+      "offset": -32.25,
+      "repeat": 1,
+      "success_rate": 0.05235602094240838,
+      "successes": 40,
+      "width": 0.275
+    },
+    {
+      "attempts": 761,
+      "ext_offset": 0,
+      "offset": -32.5,
+      "repeat": 1,
+      "success_rate": 0.05387647831800263,
+      "successes": 41,
+      "width": 0.3
+    },
+    {
+      "attempts": 759,
+      "ext_offset": 0,
+      "offset": -43.0,
+      "repeat": 1,
+      "success_rate": 0.03820816864295125,
+      "successes": 29,
+      "width": 0.275
+    },
+    {
+      "attempts": 755,
+      "ext_offset": 0,
+      "offset": -32.5,
+      "repeat": 1,
+      "success_rate": 0.052980132450331126,
+      "successes": 40,
+      "width": 0.25
+    },
+    {
+      "attempts": 753,
+      "ext_offset": 0,
+      "offset": -44.25,
+      "repeat": 1,
+      "success_rate": 0.043824701195219126,
+      "successes": 33,
+      "width": 0.325
+    },
+    {
+      "attempts": 742,
+      "ext_offset": 0,
+      "offset": -36.75,
+      "repeat": 1,
+      "success_rate": 0.0431266846361186,
+      "successes": 32,
+      "width": 0.2
+    },
+    {
+      "attempts": 738,
+      "ext_offset": 0,
+      "offset": -32.75,
+      "repeat": 1,
+      "success_rate": 0.052845528455284556,
+      "successes": 39,
+      "width": 0.275
+    },
+    {
+      "attempts": 723,
+      "ext_offset": 0,
+      "offset": -30.25,
+      "repeat": 1,
+      "success_rate": 0.04564315352697095,
+      "successes": 33,
+      "width": 0.25
+    },
+    {
+      "attempts": 716,
+      "ext_offset": 0,
+      "offset": -36.25,
+      "repeat": 1,
+      "success_rate": 0.05446927374301676,
+      "successes": 39,
+      "width": 0.2
+    },
+    {
+      "attempts": 716,
+      "ext_offset": 0,
+      "offset": -36.5,
+      "repeat": 1,
+      "success_rate": 0.034916201117318434,
+      "successes": 25,
+      "width": 0.225
+    },
+    {
+      "attempts": 708,
+      "ext_offset": 0,
+      "offset": -30.75,
+      "repeat": 1,
+      "success_rate": 0.04096045197740113,
+      "successes": 29,
+      "width": 0.25
+    },
+    {
+      "attempts": 701,
+      "ext_offset": 0,
+      "offset": -42.75,
+      "repeat": 1,
+      "success_rate": 0.052781740370898715,
+      "successes": 37,
+      "width": 0.3
+    },
+    {
+      "attempts": 683,
+      "ext_offset": 0,
+      "offset": -43.75,
+      "repeat": 1,
+      "success_rate": 0.043923865300146414,
+      "successes": 30,
+      "width": 0.3
+    },
+    {
+      "attempts": 667,
+      "ext_offset": 0,
+      "offset": -43.0,
+      "repeat": 1,
+      "success_rate": 0.037481259370314844,
+      "successes": 25,
+      "width": 0.35
+    },
+    {
+      "attempts": 654,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.047400611620795105,
+      "successes": 31,
+      "width": 0.3
+    },
+    {
+      "attempts": 652,
+      "ext_offset": 0,
+      "offset": -43.25,
+      "repeat": 1,
+      "success_rate": 0.03987730061349693,
+      "successes": 26,
+      "width": 0.275
+    },
+    {
+      "attempts": 645,
+      "ext_offset": 0,
+      "offset": -43.5,
+      "repeat": 1,
+      "success_rate": 0.03875968992248062,
+      "successes": 25,
+      "width": 0.35
+    },
+    {
+      "attempts": 644,
+      "ext_offset": 0,
+      "offset": -42.0,
+      "repeat": 1,
+      "success_rate": 0.046583850931677016,
+      "successes": 30,
+      "width": 0.525
+    },
+    {
+      "attempts": 629,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.03815580286168521,
+      "successes": 24,
+      "width": 0.475
+    },
+    {
+      "attempts": 628,
+      "ext_offset": 0,
+      "offset": -41.75,
+      "repeat": 1,
+      "success_rate": 0.050955414012738856,
+      "successes": 32,
+      "width": 0.475
+    },
+    {
+      "attempts": 619,
+      "ext_offset": 0,
+      "offset": -42.25,
+      "repeat": 1,
+      "success_rate": 0.046849757673667204,
+      "successes": 29,
+      "width": 0.5
+    },
+    {
+      "attempts": 618,
+      "ext_offset": 0,
+      "offset": -43.25,
+      "repeat": 1,
+      "success_rate": 0.061488673139158574,
+      "successes": 38,
+      "width": 0.35
+    },
+    {
+      "attempts": 616,
+      "ext_offset": 0,
+      "offset": -42.5,
+      "repeat": 1,
+      "success_rate": 0.040584415584415584,
+      "successes": 25,
+      "width": 0.575
+    },
+    {
+      "attempts": 610,
+      "ext_offset": 0,
+      "offset": -41.5,
+      "repeat": 1,
+      "success_rate": 0.04426229508196721,
+      "successes": 27,
+      "width": 0.5
+    },
+    {
+      "attempts": 608,
+      "ext_offset": 0,
+      "offset": -43.5,
+      "repeat": 1,
+      "success_rate": 0.04276315789473684,
+      "successes": 26,
+      "width": 0.275
+    },
+    {
+      "attempts": 596,
+      "ext_offset": 0,
+      "offset": -43.75,
+      "repeat": 1,
+      "success_rate": 0.040268456375838924,
+      "successes": 24,
+      "width": 0.35
+    }
+  ],
+  "seed_csv": "/home/ruixiang/chipwhisperer/firmware/mcu/simpleserial-instruction-skip-hpc/mul_seed_scan.csv",
+  "target_cycle_overlap_count": 0,
+  "target_skip_cycles": {
+    "max": 39,
+    "median": 39.0,
+    "min": 38,
+    "mode": [
+      39
+    ],
+    "n": 52564,
+    "pstdev": 0.4741898337509825,
+    "unique": [
+      38,
+      39
+    ]
+  },
+  "target_tuple_overlap_count": 0,
+  "updated_utc": "2026-08-06T07:13:01+00:00"
+}
