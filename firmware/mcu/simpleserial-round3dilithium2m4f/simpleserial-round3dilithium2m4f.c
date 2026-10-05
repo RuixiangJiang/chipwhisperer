@@ -1,36 +1,45 @@
 /*
-    Fault-injection harness for Du et al., "Breaking the Shield: Novel Fault
-    Attacks on CRYSTALS-Dilithium" (ACISP 2025), Section 6.4 / Attack Approach 1
-    of Section 5.2.
+    simpleserial-round3dilithium2m4f.c  --  rev 3
+
+    Fault-injection harness for Du et al., "Breaking the Shield" (ACISP 2025),
+    Section 6.4, with DWT performance-counter capture for HPC detectability
+    analysis.
 
     Target chain (pqm4 Dilithium2, Round 3):
-
         poly_uniform_gamma1
-          -> stream256_squeezeblocks          <-- trigger wraps this (F2, Fig. 4)
+          -> stream256_squeezeblocks          <-- trigger + counters wrap this
                -> keccak_inc_squeeze
                     -> KeccakF1600_StatePermute
-                    -> KeccakF1600_StateExtractBytes   <-- fault target (Fig. 8)
+                    -> KeccakF1600_StateExtractBytes
 
-    The paper skips the load at line 13 of Fig. 12, which should place the low
-    32 bits of state[0] into r5. When skipped, r5 keeps the 0 left there by
-    line 6, and data[0] is written as 0 while every other byte of the extracted
-    block is unaffected.
+    The fault under study is at ext_offset = 18155 + 23i: the load
+    `ldr.w r5, [r0, r5, lsl #3]` at 0x80014fe returns 0 instead of the state
+    lane. It is a DATA fault -- the instruction retires normally -- so the
+    hypothesis under test is that no DWT counter distinguishes it from a
+    clean run.
 
-    Success criterion (Section 6.4): of the first SHAKE256_RATE (136) extracted
-    bytes, data[0] changes from non-zero to 0 and bytes 1..135 are unchanged.
-
-    Only the squeeze path is compiled in. poly_uniform_gamma1 itself is not
-    called: its preamble (stream256_init) and the squeeze are reproduced here
-    verbatim, which keeps the instruction stream inside the trigger window
-    identical while avoiding a dependency on the NTT assembly.
+    COUNTER CAVEATS
+      * CYCCNT is 32-bit. CPICNT, EXCCNT, SLEEPCNT, LSUCNT, FOLDCNT are all
+        8-bit and wrap at 256. Over a ~106k-cycle window they wrap many
+        times, so the values are (true count mod 256). Small deltas remain
+        visible; absolute counts do not.
+      * Interrupts are masked across the measured region so EXCCNT stays 0
+        and UART activity cannot perturb the other counters.
+      * The counters are zeroed immediately before trigger_high() and read
+        immediately after trigger_low(), into statics, before any response
+        formatting touches the stack.
 
     Commands (SimpleSerial V2.1)
-        's'  set the CRHBYTES seed                        (CRHBYTES bytes in)
-        'n'  set the 16-bit nonce, little endian          (2 bytes in)
-        'g'  init + trigger_high + squeeze + trigger_low  (136 bytes out)
-        'b'  fetch a later 136-byte window of the squeeze buffer (1 byte in)
-        'k'  SHAKE256 known-answer test                   (n bytes in, 32 out)
-        'i'  report build info                            (8 bytes out)
+      's'  set the CRHBYTES seed                  (CRHBYTES bytes in)
+      'n'  set the 16-bit nonce, little endian    (2 bytes in)
+      'g'  measured squeeze                       (160 bytes out:
+                                                   24 B counters + 136 B data)
+      'b'  fetch a later 136-byte window          (1 byte in)
+      'd'  DWT capability report                  (8 bytes out)
+      'i'  build info                             (8 bytes out)
+
+    NOTE: 'k', 'p', 'v', 'w', 'y' are not usable as command letters on this
+    SimpleSerial build. Known-good: i r m j s a d f t b g n.
 */
 
 #include "hal.h"
@@ -43,119 +52,175 @@
 #include "symmetric.h"
 #include "fips202.h"
 
-/* Dilithium2 (GAMMA1 = 1 << 17): POLYZ_PACKEDBYTES = 576, so the squeeze
-   requests ceil(576/136) = 5 blocks in a single call. The attack lands in the
-   first iteration of keccak_inc_squeeze's while loop. */
-#ifndef POLY_UNIFORM_GAMMA1_NBLOCKS
-#define POLY_UNIFORM_GAMMA1_NBLOCKS \
+/* ------------------------------------------------------------------ */
+/* Cortex-M4 DWT, poked directly to avoid CMSIS header ambiguity.      */
+/* ------------------------------------------------------------------ */
+#define SCB_DEMCR    (*(volatile uint32_t *)0xE000EDFCu)
+#define DWT_CTRL     (*(volatile uint32_t *)0xE0001000u)
+#define DWT_CYCCNT   (*(volatile uint32_t *)0xE0001004u)
+#define DWT_CPICNT   (*(volatile uint32_t *)0xE0001008u)
+#define DWT_EXCCNT   (*(volatile uint32_t *)0xE000100Cu)
+#define DWT_SLEEPCNT (*(volatile uint32_t *)0xE0001010u)
+#define DWT_LSUCNT   (*(volatile uint32_t *)0xE0001014u)
+#define DWT_FOLDCNT  (*(volatile uint32_t *)0xE0001018u)
+
+#define DEMCR_TRCENA   (1u << 24)
+#define DWT_CYCCNTENA  (1u << 0)
+#define DWT_NOPRFCNT   (1u << 24)   /* 1 = profiling counters absent */
+#define DWT_NOCYCCNT   (1u << 25)   /* 1 = cycle counter absent      */
+
+#define DWT_CPIEVTENA   (1u << 17)
+#define DWT_EXCEVTENA   (1u << 18)
+#define DWT_SLEEPEVTENA (1u << 19)
+#define DWT_LSUEVTENA   (1u << 20)
+#define DWT_FOLDEVTENA  (1u << 21)
+
+static void dwt_init(void)
+{
+    SCB_DEMCR |= DEMCR_TRCENA;
+    __asm volatile ("dsb");
+    DWT_CYCCNT = 0;
+    DWT_CTRL |= DWT_CYCCNTENA | DWT_CPIEVTENA | DWT_EXCEVTENA
+              | DWT_SLEEPEVTENA | DWT_LSUEVTENA | DWT_FOLDEVTENA;
+}
+
+static void dwt_zero(void)
+{
+    DWT_CYCCNT   = 0;
+    DWT_CPICNT   = 0;
+    DWT_EXCCNT   = 0;
+    DWT_SLEEPCNT = 0;
+    DWT_LSUCNT   = 0;
+    DWT_FOLDCNT  = 0;
+}
+
+/* Captured out of the measured region into statics, so that response
+   formatting cannot perturb what was measured. */
+static volatile uint32_t ctr[6];
+
+#define NBLOCKS_DEFAULT \
     ((POLYZ_PACKEDBYTES + STREAM256_BLOCKBYTES - 1) / STREAM256_BLOCKBYTES)
+
+#ifndef POLY_UNIFORM_GAMMA1_NBLOCKS
+#define POLY_UNIFORM_GAMMA1_NBLOCKS NBLOCKS_DEFAULT
 #endif
 
 #define SQUEEZE_BYTES (POLY_UNIFORM_GAMMA1_NBLOCKS * STREAM256_BLOCKBYTES)
-#define WINDOW        STREAM256_BLOCKBYTES      /* 136 for SHAKE256 */
+#define WINDOW        STREAM256_BLOCKBYTES      /* 136 */
 
 static uint8_t seed[CRHBYTES];
 static uint16_t nonce = 0;
 static uint8_t sbuf[SQUEEZE_BYTES];
 
-static uint8_t reg_status = 0x11;
-
-/* -------------------------------------------------------------------------
-   's' : load the seed (rho-prime in Algorithm 1). Fixed across a campaign so
-   that every attempt produces the same clean reference block.
-   ------------------------------------------------------------------------- */
-uint8_t set_seed(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+static void put_u32(uint8_t *p, uint32_t v)
 {
-    (void)cmd; (void)scmd;
-    if (len != CRHBYTES)
-        return 0x11;
+    p[0] = (uint8_t)v;        p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* ------------------------------------------------------------------ */
+uint8_t set_seed(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
+{
+    (void)c; (void)sc;
+    if (l != CRHBYTES) return 0x11;
     memcpy(seed, in, CRHBYTES);
     return 0x00;
 }
 
-/* -------------------------------------------------------------------------
-   'n' : set the rejection-sampling nonce. Used to search for a seed/nonce pair
-   whose clean data[0] is non-zero, which the attack requires.
-   ------------------------------------------------------------------------- */
-uint8_t set_nonce(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+uint8_t set_nonce(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
 {
-    (void)cmd; (void)scmd;
-    if (len != 2)
-        return 0x11;
+    (void)c; (void)sc;
+    if (l != 2) return 0x11;
     nonce = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
     return 0x00;
 }
 
-/* -------------------------------------------------------------------------
-   'g' : the measured operation.
+/* ------------------------------------------------------------------
+   The measured operation.
 
-   stream256_init is deliberately outside the trigger window: the paper places
-   the trigger around stream256_squeezeblocks only, and keeping the absorb out
-   of the window means ext_offset counts cycles from the start of the squeeze.
-   ------------------------------------------------------------------------- */
-uint8_t run_squeeze(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+   stream256_init stays outside the window: the paper places the trigger
+   around stream256_squeezeblocks only, so ext_offset counts cycles from
+   the start of the squeeze.
+
+   The 0xA5 prefill distinguishes a skipped store (byte keeps 0xA5) from a
+   zeroed load (byte becomes 0x00). Do not change it to zero.
+   ------------------------------------------------------------------ */
+uint8_t run_squeeze(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
 {
-    (void)cmd; (void)scmd; (void)len; (void)in;
+    (void)c; (void)sc; (void)l; (void)in;
 
     stream256_state state;
+    uint8_t out[24 + WINDOW];
 
     memset(sbuf, 0xA5, sizeof(sbuf));
     stream256_init(&state, seed, nonce);
+
+    /* Mask interrupts so EXCCNT stays 0 and nothing else perturbs the
+       counters mid-window. */
+    __asm volatile ("cpsid i" ::: "memory");
+    dwt_zero();
+    __asm volatile ("dsb" ::: "memory");
 
     trigger_high();
     stream256_squeezeblocks(sbuf, POLY_UNIFORM_GAMMA1_NBLOCKS, &state);
     trigger_low();
 
-    simpleserial_put('r', WINDOW, sbuf);
+    __asm volatile ("dsb" ::: "memory");
+    ctr[0] = DWT_CYCCNT;
+    ctr[1] = DWT_CPICNT;
+    ctr[2] = DWT_EXCCNT;
+    ctr[3] = DWT_SLEEPCNT;
+    ctr[4] = DWT_LSUCNT;
+    ctr[5] = DWT_FOLDCNT;
+    __asm volatile ("cpsie i" ::: "memory");
+
+    for (int i = 0; i < 6; i++)
+        put_u32(out + 4 * i, ctr[i]);
+    memcpy(out + 24, sbuf, WINDOW);
+
+    simpleserial_put('r', sizeof(out), out);
     return 0x00;
 }
 
-/* -------------------------------------------------------------------------
-   'b' : page out a later window of the squeeze buffer, for checking whether a
-   fault perturbed blocks beyond the first. Not used in the hot loop.
-   ------------------------------------------------------------------------- */
-uint8_t get_block(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+uint8_t get_block(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
 {
-    (void)cmd; (void)scmd;
-    if (len != 1)
-        return 0x11;
+    (void)c; (void)sc;
+    if (l != 1) return 0x11;
     uint8_t idx = in[0];
-    if (idx >= POLY_UNIFORM_GAMMA1_NBLOCKS)
-        return 0x12;
+    if (idx >= POLY_UNIFORM_GAMMA1_NBLOCKS) return 0x12;
     simpleserial_put('r', WINDOW, sbuf + (uint32_t)idx * WINDOW);
     return 0x00;
 }
 
-/* -------------------------------------------------------------------------
-   'k' : SHAKE256(in) truncated to 32 bytes. Validates the whole fips202 chain
-   against hashlib.shake_256 on the host before any glitching.
-   ------------------------------------------------------------------------- */
-uint8_t shake_kat(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+/* DWT capability report: NOPRFCNT / NOCYCCNT are implementation-defined,
+   so confirm the counters exist rather than assuming. */
+uint8_t dwt_report(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
 {
-    (void)cmd; (void)scmd;
-    uint8_t out[32];
-    shake256(out, sizeof(out), in, len);
-    simpleserial_put('r', sizeof(out), out);
+    (void)c; (void)sc; (void)l; (void)in;
+    uint8_t o[8];
+    uint32_t ctrl = DWT_CTRL;
+    put_u32(o + 0, ctrl);
+    o[4] = (ctrl & DWT_NOPRFCNT) ? 0 : 1;   /* 1 = profiling counters present */
+    o[5] = (ctrl & DWT_NOCYCCNT) ? 0 : 1;   /* 1 = cycle counter present      */
+    o[6] = (SCB_DEMCR & DEMCR_TRCENA) ? 1 : 0;
+    o[7] = 0x03;                            /* harness revision */
+    simpleserial_put('r', sizeof(o), o);
     return 0x00;
 }
 
-/* -------------------------------------------------------------------------
-   'i' : build parameters, so the host can assert the firmware matches what the
-   campaign script assumes.
-   ------------------------------------------------------------------------- */
-uint8_t info(uint8_t cmd, uint8_t scmd, uint8_t len, uint8_t *in)
+uint8_t info(uint8_t c, uint8_t sc, uint8_t l, uint8_t *in)
 {
-    (void)cmd; (void)scmd; (void)len; (void)in;
-    uint8_t out[8];
-    out[0] = (uint8_t)CRHBYTES;
-    out[1] = (uint8_t)STREAM256_BLOCKBYTES;
-    out[2] = (uint8_t)POLY_UNIFORM_GAMMA1_NBLOCKS;
-    out[3] = (uint8_t)(POLYZ_PACKEDBYTES & 0xFF);
-    out[4] = (uint8_t)((POLYZ_PACKEDBYTES >> 8) & 0xFF);
-    out[5] = (uint8_t)(SQUEEZE_BYTES & 0xFF);
-    out[6] = (uint8_t)((SQUEEZE_BYTES >> 8) & 0xFF);
-    out[7] = reg_status;
-    simpleserial_put('r', sizeof(out), out);
+    (void)c; (void)sc; (void)l; (void)in;
+    uint8_t o[8];
+    o[0] = (uint8_t)CRHBYTES;
+    o[1] = (uint8_t)STREAM256_BLOCKBYTES;
+    o[2] = (uint8_t)POLY_UNIFORM_GAMMA1_NBLOCKS;
+    o[3] = (uint8_t)(POLYZ_PACKEDBYTES & 0xFF);
+    o[4] = (uint8_t)((POLYZ_PACKEDBYTES >> 8) & 0xFF);
+    o[5] = (uint8_t)(SQUEEZE_BYTES & 0xFF);
+    o[6] = (uint8_t)((SQUEEZE_BYTES >> 8) & 0xFF);
+    o[7] = 0x03;
+    simpleserial_put('r', sizeof(o), o);
     return 0x00;
 }
 
@@ -164,20 +229,18 @@ int main(void)
     platform_init();
     init_uart();
     trigger_setup();
+    dwt_init();
 
-    /* Deterministic default seed so a bare 'g' works before any 's'. */
     for (unsigned i = 0; i < CRHBYTES; i++)
         seed[i] = (uint8_t)i;
 
     simpleserial_init();
-    uint8_t reg = 0;
-    reg |= (simpleserial_addcmd('s', CRHBYTES, set_seed)  != 0) << 0;
-    reg |= (simpleserial_addcmd('n', 2,        set_nonce) != 0) << 1;
-    reg |= (simpleserial_addcmd('g', 0,        run_squeeze) != 0) << 2;
-    reg |= (simpleserial_addcmd('b', 1,        get_block) != 0) << 3;
-    reg |= (simpleserial_addcmd('k', 32,       shake_kat) != 0) << 4;
-    reg |= (simpleserial_addcmd('i', 0,        info)      != 0) << 5;
-    reg_status = reg;
+    simpleserial_addcmd('s', CRHBYTES, set_seed);
+    simpleserial_addcmd('n', 2, set_nonce);
+    simpleserial_addcmd('g', 0, run_squeeze);
+    simpleserial_addcmd('b', 1, get_block);
+    simpleserial_addcmd('d', 0, dwt_report);
+    simpleserial_addcmd('i', 0, info);
 
     while (1)
         simpleserial_get();
