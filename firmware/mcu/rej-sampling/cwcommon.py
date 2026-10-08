@@ -1,0 +1,64 @@
+"""Entry 5 shared setup. classify() implements the judging table:
+  store skipped -> exactly one slot differs AND still holds the sentinel."""
+import chipwhisperer as cw, struct, time
+from rej import REF, SENTINEL, N
+
+HUSKY_SN = '50203220573555303030343235323038'
+FW = "rej-sampling-CW308_STM32F4.hex"
+MAGIC = bytes([0x5A,0xA5,0x3C,0xC3])
+Q = 8380417
+
+def connect(program=True):
+    scope = cw.scope(sn=HUSKY_SN); scope.default_setup()
+    scope.clock.clkgen_freq = 7.37e6
+    target = cw.target(scope, cw.targets.SimpleSerial2)
+    print("connected:", scope._getNAEUSB().snum)
+    if program: cw.program_target(scope, cw.programmers.STM32FProgrammer, FW)
+    return scope, target
+
+def arm_glitch(scope):
+    scope.glitch.enabled=True; scope.glitch.clk_src='pll'
+    scope.glitch.output='clock_xor'; scope.glitch.trigger_src='ext_single'
+    scope.glitch.repeat=1; scope.io.hs2='glitch'
+
+def reboot(scope):
+    scope.io.nrst='low'; time.sleep(0.05); scope.io.nrst='high_z'; time.sleep(0.1)
+
+def parse(r):
+    if r is None or len(r) < 29: return None
+    if bytes(r[0:4]) != MAGIC:   return 'BAD_FRAME'
+    u16 = lambda i: struct.unpack('<H', bytes(r[i:i+2]))[0]
+    u32 = lambda i: struct.unpack('<I', bytes(r[i:i+4]))[0]
+    if u32(22) < 1000 or u32(22) > 100000: return 'BAD_COUNTERS'
+    return dict(ctr=u16(4), n_diff=u16(6), first_diff=u16(8), bad=u32(10),
+                n_sent=u16(14), first_sent=u16(16), cksum=u32(18),
+                cyc=u32(22), cpi=r[26], lsu=r[27], fold=r[28])
+
+def _bytediff(a, b):
+    return sum((((a >> sh) & 0xFF) != ((b >> sh) & 0xFF)) for sh in (0, 8, 16, 24))
+
+def safe(d, base_cyc=0):
+    """_BADFRAME: turn a non-dict parse() result into a labelled dict."""
+    if isinstance(d, dict): return d
+    return dict(cyc=base_cyc, cpi=0, lsu=0, fold=0, ctr=-1, n_diff=0,
+                first_diff=0, bad=0, n_sent=0, first_sent=0, cksum=0,
+                _bad=('NOFRAME' if not d else 'BADFRAME:'+str(d)[:20]))
+
+def classify(d):
+    if not isinstance(d, dict): return str(d) if d else 'NOFRAME'
+    if d.get('_bad'):           return d['_bad']
+    """The judging table. STORE_SKIP is the Ravi target."""
+    if d['ctr'] != N:                       return f"CTR_WRONG({d['ctr']})"
+    if d['n_diff'] == 0:                    return 'normal'
+    k = d['first_diff']
+    if d['n_diff'] == 1 and d['bad'] == SENTINEL:
+        return f'STORE_SKIP@{k}'            # <-- exactly one slot, sentinel intact
+    if d['n_diff'] == 1 and _bytediff(d['bad'], SENTINEL) <= 2:
+        return f'STORE_PARTIAL@{k}'
+    if d['bad'] >= Q:
+        return f'ACCEPT_BAD@{k}'            # a rejected sample got stored
+    if k < N-1 and d['bad'] == (REF[k+1] & 0xFFFFFFFF):
+        return f'CTR_INC_SKIP@{k}'          # array shifted by one from k
+    return f'other(nd={d["n_diff"]},k={k})'
+
+def fingerprint(d): return (d['cyc'], d['cpi'], d['lsu'], d['fold'])
